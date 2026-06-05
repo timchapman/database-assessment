@@ -59,10 +59,17 @@ Param(
     [Parameter(Mandatory = $false)][string]$manualUniqueId = "NA",
     [Parameter(Mandatory = $false)][switch]$collectVMSpecs,
     [Parameter(Mandatory = $false)][switch]$useWindowsAuthentication = $false,
+    [Parameter(Mandatory = $false)][switch]$useEntraIDAuthentication = $false,
     [Parameter(Mandatory = $false)][string]$outputDirectory = "default"
 )
 
 Import-Module $PSScriptRoot\dmaCollectorCommonFunctions.psm1
+
+if ($useEntraIDAuthentication -and (-not [string]::IsNullOrEmpty($collectionUserName))) {
+    Write-Host "-collectionUserName / -collectionUserPass must not be supplied with -useEntraIDAuthentication." -ForegroundColor Red
+    Write-Host "Authentication identity comes from the Azure CLI session (az login)." -ForegroundColor Red
+    Exit 1
+}
 
 $powerShellVersion = $PSVersionTable.PSVersion.Major
 $foldername = ""
@@ -94,6 +101,7 @@ if ($ignorePerfmon -eq "true") {
     }
 }
 
+if (-not $useEntraIDAuthentication) {
 if ((([string]::IsNullorEmpty($collectionUserPass)) -or ([string]$collectionUserPass -eq "false")) -and (-not $useWindowsAuthentication)) {
     if ([string]($collectionUserName) -ne $(whoami)) {
         Write-Output ""
@@ -143,7 +151,42 @@ else {
     Write-Host "#############################################################"
     Write-Host ""
 }
+}
 
+if ($useEntraIDAuthentication) {
+    if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+        Write-Host "Azure CLI (az) is required for Entra ID authentication. Install from https://aka.ms/installazurecliwindows" -ForegroundColor Red
+        Exit 1
+    }
+    $sqlcmdHelp = & sqlcmd --help 2>&1
+    if ($sqlcmdHelp -notmatch "go-sqlcmd") {
+        Write-Host "go-sqlcmd is required for Entra ID authentication. Install from https://github.com/microsoft/go-sqlcmd" -ForegroundColor Red
+        Exit 1
+    }
+    $azAccount = az account show 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "No Azure CLI session found. Launching az login..."
+        az login
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Azure login failed. Exiting." -ForegroundColor Red
+            Exit 1
+        }
+    }
+    $entraUpn = (az account show --query user.name -o tsv 2>$null).Trim()
+    Write-Host ""
+    Write-Host "#############################################################"
+    Write-Host "#                                                           #"
+    Write-Host "#    Executing Collection with Entra ID Authentication      #"
+    Write-Host "#                                                           #"
+    Write-Host "#############################################################"
+    Write-Host "    Signed in as: $entraUpn"
+    Write-Host ""
+    $sqlcmdAuthArgs = @("--authentication-method", "ActiveDirectoryDefault")
+} else {
+    $sqlcmdAuthArgs = @()
+}
+
+if (-not $useEntraIDAuthentication) {
 $sqlcmdVersion = Get-Command sqlcmd | Select-Object -ExpandProperty Version
 $requiredVersion = "11.0.7512.0"
 if ($sqlcmdVersion -lt $requiredVersion) {
@@ -168,6 +211,7 @@ if ($sqlcmdVersion -lt $requiredVersion) {
         Exit
     }
 }
+}
 
 if ($(Get-Location).Path -ne $PSScriptRoot) {
     $currentTimestamp = "[{0:MM/dd/yy} {0:HH:mm:ss}]" -f (Get-Date)
@@ -184,7 +228,7 @@ if ([string]::IsNullorEmpty($serverName)) {
     Write-Output "Server parameter $serverName is empty.  Ensure that the parameter is provided"
     Exit 1
 }
-elseif ([string]::IsNullorEmpty($collectionUserName) -and (-not $useWindowsAuthentication)) {
+elseif ([string]::IsNullorEmpty($collectionUserName) -and (-not $useWindowsAuthentication) -and (-not $useEntraIDAuthentication)) {
     Write-Output "Collection Username parameter $collectionUserName is empty."
     Write-Output "Ensure that the parameter is provided or -useWindowsAuthentication is specified"
     Exit 1
@@ -199,14 +243,14 @@ else {
     if (([string]::IsNullorEmpty($port)) -or ($port -eq "default")) {
         WriteLog -logMessage "Retrieving Metadata Information from $serverName" -logOperation "MESSAGE"
         $inputServerName = $serverName
-        $folderObj = sqlcmd -S $serverName -i sql\foldername.sql -d master -C -l 30 -W -m 1 -u -w 32768 -v database=$databaseNameFilter | findstr /v /c:"---"
-        $validSQLInstanceVersionCheckArray = @(sqlcmd -S $serverName -i sql\checkValidInstanceVersion.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768)
-        $dbNameArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter -v hasdbaccess=1)
-        $dbNameNoAccessArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter -v hasdbaccess=0)
-        $dmaSourceIdObj = @(sqlcmd -S $serverName -i sql\getDmaSourceId.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768)
+        $folderObj = sqlcmd -S $serverName -i sql\foldername.sql -d master -C -l 30 -W -m 1 -u -w 32768 -v database=$databaseNameFilter @sqlcmdAuthArgs | findstr /v /c:"---"
+        $validSQLInstanceVersionCheckArray = @(sqlcmd -S $serverName -i sql\checkValidInstanceVersion.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 @sqlcmdAuthArgs)
+        $dbNameArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter -v hasdbaccess=1 @sqlcmdAuthArgs)
+        $dbNameNoAccessArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter -v hasdbaccess=0 @sqlcmdAuthArgs)
+        $dmaSourceIdObj = @(sqlcmd -S $serverName -i sql\getDmaSourceId.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 @sqlcmdAuthArgs)
 
         if ([string]$database -ne "all") {
-            $validDBObj = sqlcmd -S $serverName -i sql\checkValidDatabase.sql -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter | findstr /v /c:"-"
+            $validDBObj = sqlcmd -S $serverName -i sql\checkValidDatabase.sql -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter @sqlcmdAuthArgs | findstr /v /c:"-"
             if (([string]::IsNullorEmpty($folderObj)) -or ([int]$validDBObj -eq 0)) {
                 Write-Output " "
                 Write-Output "SQL Server Database $database not valid.  Exiting Script...."
@@ -218,14 +262,14 @@ else {
         $inputServerName = $serverName
         $serverName = "$serverName,$port"
         WriteLog -logMessage "Retrieving Metadata Information from $serverName" -logOperation "MESSAGE"
-        $folderObj = sqlcmd -S $serverName -i sql\foldername.sql -d master -C -l 30 -W -m 1 -u -w 32768 -v database=$databaseNameFilter | findstr /v /c:"---"
-        $validSQLInstanceVersionCheckArray = @(sqlcmd -S $serverName -i sql\checkValidInstanceVersion.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768)
-        $dbNameArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter -v hasdbaccess=1)
-        $dbNameNoAccessArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter -v hasdbaccess=0)
-        $dmaSourceIdObj = @(sqlcmd -S $serverName -i sql\getDmaSourceId.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768)
+        $folderObj = sqlcmd -S $serverName -i sql\foldername.sql -d master -C -l 30 -W -m 1 -u -w 32768 -v database=$databaseNameFilter @sqlcmdAuthArgs | findstr /v /c:"---"
+        $validSQLInstanceVersionCheckArray = @(sqlcmd -S $serverName -i sql\checkValidInstanceVersion.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 @sqlcmdAuthArgs)
+        $dbNameArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter -v hasdbaccess=1 @sqlcmdAuthArgs)
+        $dbNameNoAccessArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter -v hasdbaccess=0 @sqlcmdAuthArgs)
+        $dmaSourceIdObj = @(sqlcmd -S $serverName -i sql\getDmaSourceId.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 @sqlcmdAuthArgs)
 
         if ([string]$database -ne "all") {
-            $validDBObj = sqlcmd -S $serverName -i sql\checkValidDatabase.sql -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter | findstr /v /c:"-"
+            $validDBObj = sqlcmd -S $serverName -i sql\checkValidDatabase.sql -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database=$databaseNameFilter @sqlcmdAuthArgs | findstr /v /c:"-"
             if (([string]::IsNullorEmpty($folderObj)) -or ([int]$validDBObj -eq 0)) {
                 Write-Output " "
                 Write-Output "SQL Server Database $database not valid.  Exiting Script...."
@@ -497,39 +541,39 @@ if ($dbNameNoAccessArray.Count -gt 0) {
 
 WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Installed Components..." -logOperation "BOTH"
 Set-Content -Path $foldername\$compFileName -Encoding utf8 -Value '"PKEY"|"physical_server_name"|"sql_instance_name"|"sql_server_services"|"current_service_status"|"status_date_time"|"dma_source_id"|"dma_manual_id"'
-sqlcmd -S $serverName -i sql\componentsInstalled.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$compFileName -Encoding utf8
+sqlcmd -S $serverName -i sql\componentsInstalled.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$compFileName -Encoding utf8
 
 WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Properties..." -logOperation "BOTH"
 Set-Content -Path $foldername\$srvFileName -Encoding utf8 -Value '"PKEY"|"property_name"|"property_value"|"dma_source_id"|"dma_manual_id"'
-sqlcmd -S $serverName -i sql\serverProperties.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$srvFileName -Encoding utf8
+sqlcmd -S $serverName -i sql\serverProperties.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$srvFileName -Encoding utf8
 
 WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server CloudSQL Unsupported Flag Info..." -logOperation "BOTH"
 Set-Content -Path $foldername\$dbServerFlags -Encoding utf8 -Value '"PKEY"|"flag_name"|"value"|"value_in_use"|"description"|"dma_source_id"|"dma_manual_id"'
-sqlcmd -S $serverName -i sql\dbServerUnsupportedFlags.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$dbServerFlags -Encoding utf8
+sqlcmd -S $serverName -i sql\dbServerUnsupportedFlags.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$dbServerFlags -Encoding utf8
 
 WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Blocked Features in Use..." -logOperation "BOTH"
 Set-Content -Path $foldername\$blockingFeatures -Encoding utf8 -Value '"PKEY"|"Features"|"Is_EnabledOrUsed"|"Count"|"dma_source_id"|"dma_manual_id"'
-sqlcmd -S $serverName -i sql\dbServerFeatures.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$blockingFeatures -Encoding utf8
+sqlcmd -S $serverName -i sql\dbServerFeatures.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$blockingFeatures -Encoding utf8
 
 WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Linked Server Info..." -logOperation "BOTH"
 Set-Content -Path $foldername\$linkedServers -Encoding utf8 -Value '"pkey"|"name"|"product"|"provider"|"data_source"|"location"|"provider_string"|"catalog"|"dma_source_id"|"dma_manual_id"'
-sqlcmd -S $serverName -i sql\linkedServersDetail.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$linkedServers -Encoding utf8
+sqlcmd -S $serverName -i sql\linkedServersDetail.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$linkedServers -Encoding utf8
 
 WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Cluster Node Info..." -logOperation "BOTH"
 Set-Content -Path $foldername\$dbClusterNodes -Encoding utf8 -Value '"pkey"|"node_name"|"status"|"status_description"|"dma_source_id"|"dma_manual_id"'
-sqlcmd -S $serverName -i sql\dbClusterNodes.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$dbClusterNodes -Encoding utf8
+sqlcmd -S $serverName -i sql\dbClusterNodes.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$dbClusterNodes -Encoding utf8
 
 WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server DBCC Trace Info..." -logOperation "BOTH"
 Set-Content -Path $foldername\$dbccTraceFlg -Encoding utf8 -Value '"PKEY"|"name"|"status"|"global"|"session"|"dma_source_id"|"dma_manual_id"'
-sqlcmd -S $serverName -i sql\dbccTraceFlags.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$dbccTraceFlg -Encoding utf8
+sqlcmd -S $serverName -i sql\dbccTraceFlags.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$dbccTraceFlg -Encoding utf8
 
 WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Disk Volume Info..." -logOperation "BOTH"
 Set-Content -Path $foldername\$diskVolumeInfo -Encoding utf8 -Value '"PKEY"|"volume_mount_point"|"file_system_type"|"logical_volume_name"|"total_size_gb"|"available_size_gb"|"space_free_pct"|"cluster_block_size"|"dma_source_id"|"dma_manual_id"'
-sqlcmd -S $serverName -i sql\diskVolumeInfo.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$diskVolumeInfo -Encoding utf8
+sqlcmd -S $serverName -i sql\diskVolumeInfo.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$diskVolumeInfo -Encoding utf8
 
 WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Configuration Info..." -logOperation "BOTH"
 Set-Content -Path $foldername\$dbServerConfig -Encoding utf8 -Value '"pkey"|"configuration_id"|"name"|"value"|"minimum"|"maximum"|"value_in_use"|"description"|"dma_source_id"|"dma_manual_id"'
-sqlcmd -S $serverName -i sql\dbServerConfigurationSettings.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$dbServerConfig -Encoding utf8
+sqlcmd -S $serverName -i sql\dbServerConfigurationSettings.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$dbServerConfig -Encoding utf8
 
 if ($isCloudOrLinuxHost -eq "AZURE") {
     WriteLog -logLocation $foldername\$logFile -logMessage "Skipping SQL Server Transaction Log Backup Info...Unavailable in AZURE SQL Managed Instance." -logOperation "BOTH"
@@ -542,8 +586,8 @@ else {
     WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Transaction Log Backup Info..." -logOperation "BOTH"
     Set-Content -Path $foldername\$tranLogBkupCountByDayByHour -Encoding utf8 -Value '"PKEY"|"collection_date"|"day_of_month"|"total_logs_generated"|"h0_count"|"h1_count"|"h2_count"|"h3_count"|"h4_count"|"h5_count"|"h6_count"|"h7_count"|"h8_count"|"h9_count"|"h10_count"|"h11_count"|"h12_count"|"h13_count"|"h14_count"|"h15_count"|"h16_count"|"h17_count"|"h18_count"|"h19_count"|"h20_count"|"h21_count"|"h22_count"|"h23_count"|"avg_per_hour"|"dma_source_id"|"dma_manual_id"'
     Set-Content -Path $foldername\$tranLogBkupSizeByDayByHour -Encoding utf8 -Value '"PKEY"|"collection_date"|"day_of_month"|"total_logs_generated_in_mb"|"h0_size_in_mb"|"h1_size_in_mb"|"h2_size_in_mb"|"h3_size_in_mb"|"h4_size_in_mb"|"h5_size_in_mb"|"h6_size_in_mb"|"h7_size_in_mb"|"h8_size_in_mb"|"h9_size_in_mb"|"h10_size_in_mb"|"h11_size_in_mb"|"h12_size_in_mb"|"h13_size_in_mb"|"h14_size_in_mb"|"h15_size_in_mb"|"h16_size_in_mb"|"h17_size_in_mb"|"h18_size_in_mb"|"h19_size_in_mb"|"h20_size_in_mb"|"h21_size_in_mb"|"h22_size_in_mb"|"h23_size_in_mb"|"avg_mb_per_hour"|"dma_source_id"|"dma_manual_id"'
-    sqlcmd -S $serverName -i sql\dbServerTranLogBackupCountByDayByHour.sql -d msdb -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$tranLogBkupCountByDayByHour -Encoding utf8
-    sqlcmd -S $serverName -i sql\dbServerTranLogBackupSizeByDayByHour.sql -d msdb -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$tranLogBkupSizeByDayByHour -Encoding utf8
+    sqlcmd -S $serverName -i sql\dbServerTranLogBackupCountByDayByHour.sql -d msdb -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$tranLogBkupCountByDayByHour -Encoding utf8
+    sqlcmd -S $serverName -i sql\dbServerTranLogBackupSizeByDayByHour.sql -d msdb -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$tranLogBkupSizeByDayByHour -Encoding utf8
 }
 
 ### First establish headers for the collection files which could execute against multiple databases in the instance
@@ -562,28 +606,28 @@ foreach ($databaseName in $dbNameArray) {
     $databaseName = '"{0}"' -f $databaseName
     if ($databaseName -inotmatch "tempdb") {
         WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Object Info for Database $databaseName ..." -logOperation "BOTH"
-        sqlcmd -S $serverName -i sql\objectList.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$objectList -Encoding utf8
+        sqlcmd -S $serverName -i sql\objectList.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$objectList -Encoding utf8
 
         WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Table Info for Database $databaseName ..." -logOperation "BOTH"
-        sqlcmd -S $serverName -i sql\tableList.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$tableList -Encoding utf8
+        sqlcmd -S $serverName -i sql\tableList.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$tableList -Encoding utf8
 
         WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Index Info for Database $databaseName ..." -logOperation "BOTH"
-        sqlcmd -S $serverName -i sql\indexList.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$indexList -Encoding utf8
+        sqlcmd -S $serverName -i sql\indexList.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$indexList -Encoding utf8
 
         WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Column Datatype Info for Database $databaseName ..." -logOperation "BOTH"
-        sqlcmd -S $serverName -i sql\columnDatatypes.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$columnDatatypes -Encoding utf8
+        sqlcmd -S $serverName -i sql\columnDatatypes.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$columnDatatypes -Encoding utf8
 
         WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server User Connection Info for Database $databaseName ..." -logOperation "BOTH"
-        sqlcmd -S $serverName -i sql\userConnectionInfo.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$userConnectionList -Encoding utf8
+        sqlcmd -S $serverName -i sql\userConnectionInfo.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$userConnectionList -Encoding utf8
 
         WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server DMV Perfmon Info for Database $databaseName ..." -logOperation "BOTH"
-        sqlcmd -S $serverName -i sql\dbServerDmvPerfmon.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$dbServerDmvPerfmon -Encoding utf8
+        sqlcmd -S $serverName -i sql\dbServerDmvPerfmon.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$dbServerDmvPerfmon -Encoding utf8
 
         WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Blocked Features for Database $databaseName ..." -logOperation "BOTH"
-        sqlcmd -S $serverName -i sql\dbServerFeaturesDatabaseLevel.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$databaseLevelBlockingFeatures -Encoding utf8
+        sqlcmd -S $serverName -i sql\dbServerFeaturesDatabaseLevel.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$databaseLevelBlockingFeatures -Encoding utf8
     }
     WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Database Size Info for Database $databaseName ..." -logOperation "BOTH"
-    sqlcmd -S $serverName -i sql\dbSizes.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$dbsizes -Encoding utf8
+    sqlcmd -S $serverName -i sql\dbSizes.sql -d $databaseName -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$dbsizes -Encoding utf8
 }
 
 ### Need to execute certain files against tempdb to gather temp table information
@@ -592,7 +636,7 @@ if ($isCloudOrLinuxHost -eq "AZURE") {
 }
 else {
     WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Temp Table Info..." -logOperation "BOTH"
-    sqlcmd -S $serverName -i sql\tableList.sql -d tempdb -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" | findstr /v /c:"---" | Add-Content -Path $foldername\$tableList -Encoding utf8
+    sqlcmd -S $serverName -i sql\tableList.sql -d tempdb -C -l 30 -W -m 1 -u -h-1 -w 32768 -v pkey=$pkey database=$databaseName dmaSourceId=$dmaSourceId dmaManualId=$manualUniqueId -s"|" @sqlcmdAuthArgs | findstr /v /c:"---" | Add-Content -Path $foldername\$tableList -Encoding utf8
 }
 # Pull perfmon file if we are running from same server.  Generate empty file if running on remote server
 # Capability does not exist yet to run against remote computer

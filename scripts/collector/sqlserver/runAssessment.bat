@@ -22,6 +22,7 @@ set database=all
 set noPerfmon=false
 set collectVMSpecs=
 set useWindowsAuthentication=false
+set useEntraIDAuthentication=false
 set outputDir=default
 
 set helpMessage=Usage: runAssessment.bat -serverName [servername] -port [port number] -database [database name] -collectionUserName [username] -collectionUserPass [password] -ignorePerfmon [true/false] -manualUniqueId [unique tag to identify collection] [-collectVMSpecs] -outputDirectory [write zip file to different directory]
@@ -31,6 +32,7 @@ set helpExampleDatabase=Example (default port / single database): runAssessment.
 set helpExampleDatabasePort=Example (specified port / single database): runAssessment.bat -serverName MS-SERVER1 -port 1436 -database AdventureWorks2019 -collectionUserName sa -collectionUserPass password123 -ignorePerfmon [true/false] -manualUniqueId mySQLServerDB1
 set helpExampleCollectVMSpecs=Example (collect specs from host VM): runAssessment.bat -serverName MS-SERVER1\SQL2019 -collectionUserName sa -collectionUserPass password123 -ignorePerfmon [true/false] -manualUniqueId mySQLServerDB1 -collectVMSpecs
 set helpUseWindowsAuth=Example (collect specs from host VM): runAssessment.bat -serverName MS-SERVER1\SQL2019 -collectionUserName sa -ignorePerfmon [true/false] -manualUniqueId mySQLServerDB1 -collectVMSpecs -useWindowsAuthentication
+set helpUseEntraIDAuth=Example (Entra ID / Azure AD MFA): runAssessment.bat -serverName MI-SERVER.database.windows.net -ignorePerfmon [true/false] -manualUniqueId mySQLServerDB1 -useEntraIDAuthentication
 
 if [%1]==[] (
     goto helpOperation
@@ -51,6 +53,7 @@ if /i "%1" == "-ignorePerfmon" set "noPerfmon=%2"
 if /i "%1" == "-manualUniqueId" set "manualUniqueId=%2"
 if /i "%1" == "-collectVMSpecs" set "collectVMSpecs=true"
 if /i "%1" == "-useWindowsAuthentication" set "useWindowsAuthentication=true"
+if /i "%1" == "-useEntraIDAuthentication" set "useEntraIDAuthentication=true"
 if /i "%1" == "-outputDirectory" set "outputDir=%2"
 
 shift
@@ -58,6 +61,7 @@ goto :loop
 
 :evaluateUser
 if [%serverName%]==[] goto raiseServerError
+if "%useEntraIDAuthentication%"=="true" goto execEntraID
 if not [%manualUniqueId%]==[] (
    if not "%manualUniqueId%"=="%manualUniqueId: =%" goto raiseTagError
 )
@@ -89,6 +93,16 @@ if "%collectVMSpecs%"=="" (
 	CALL %command% -collectVMSpecs
 )
 
+if %errorlevel% == 1 goto exit
+goto done
+
+:execEntraID
+SET "command=PowerShell -nologo -NoProfile -ExecutionPolicy Bypass -File .\instanceReview.ps1 -serverName %serverName% -port %port% -database %database% -ignorePerfmon %noPerfmon% -manualUniqueId %manualUniqueId% -useEntraIDAuthentication -outputDirectory %outputDir%"
+if "%collectVMSpecs%"=="" (
+    CALL %command%
+) ELSE (
+    CALL %command% -collectVMSpecs
+)
 if %errorlevel% == 1 goto exit
 goto done
 
@@ -125,6 +139,8 @@ echo:
 echo %helpExampleCollectVMSpecs%
 echo:
 echo %helpUseWindowsAuth%
+echo:
+echo %helpUseEntraIDAuth%
 echo:
 goto done
 
