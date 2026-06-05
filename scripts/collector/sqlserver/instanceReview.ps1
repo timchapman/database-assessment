@@ -186,6 +186,79 @@ if ($useEntraIDAuthentication) {
     $sqlcmdAuthArgs = @()
 }
 
+# Establish a persistent shared ADO.NET connection to guarantee exactly ONE Entra MFA prompt across all 50+ queries
+function sqlcmd {
+    $serverInstance = $serverName
+    $inputFile = ""
+    $dbName = "master"
+    $variables = @{}
+
+    for ($idx = 0; $idx -lt $args.Count; $idx++) {
+        $token = $args[$idx]
+        if ($token -eq "-S") { $serverInstance = $args[++$idx] }
+        elseif ($token -eq "-i") { $inputFile = $args[++$idx] }
+        elseif ($token -eq "-d") { $dbName = $args[++$idx] }
+        elseif ($token -eq "-v") {
+            while ($idx + 1 -lt $args.Count -and $args[$idx+1] -notmatch "^-") {
+                $assignment = $args[++$idx]
+                if ($assignment -match "=") {
+                    $parts = $assignment.Split('=', 2)
+                    $variables[$parts[0].Trim()] = $parts[1].Trim()
+                }
+            }
+        }
+    }
+
+    if (-not $global:persistentSqlConn) {
+        Import-Module SqlServer -ErrorAction SilentlyContinue
+        $connStr = "Server=$serverInstance;Database=$dbName;TrustServerCertificate=True"
+        if ($useEntraIDAuthentication) {
+            $connStr += ";Authentication=Active Directory Interactive"
+            if ($entraUpn) { $connStr += ";User ID=$entraUpn" }
+        } elseif ($env:SQLCMDUSER -and $env:SQLCMDPASSWORD) {
+            $connStr += ";User ID=$env:SQLCMDUSER;Password=$env:SQLCMDPASSWORD"
+        } else {
+            $connStr += ";Integrated Security=True"
+        }
+
+        try {
+            $global:persistentSqlConn = New-Object Microsoft.Data.SqlClient.SqlConnection($connStr)
+        } catch {
+            $global:persistentSqlConn = New-Object System.Data.SqlClient.SqlConnection($connStr)
+        }
+        $global:persistentSqlConn.Open()
+    } else {
+        if ($global:persistentSqlConn.Database -ne $dbName) {
+            $global:persistentSqlConn.ChangeDatabase($dbName)
+        }
+    }
+
+    if ($inputFile -and (Test-Path $inputFile)) {
+        $query = (Get-Content $inputFile -Raw)
+        foreach ($varKey in $variables.Keys) {
+            $query = $query.Replace("`$($varKey)", "$($variables[$varKey])")
+        }
+
+        $cmd = $global:persistentSqlConn.CreateCommand()
+        $cmd.CommandText = $query
+        $cmd.CommandTimeout = 300
+
+        try {
+            $reader = $cmd.ExecuteReader()
+            while ($reader.Read()) {
+                $rowVals = @()
+                for ($c = 0; $c -lt $reader.FieldCount; $c++) {
+                    $rowVals += "$($reader.GetValue($c))"
+                }
+                $rowVals -join "|"
+            }
+            $reader.Close()
+        } catch {
+            Write-Error $_.Exception.Message
+        }
+    }
+}
+
 if (-not $useEntraIDAuthentication) {
 $sqlcmdVersion = Get-Command sqlcmd | Select-Object -ExpandProperty Version
 $requiredVersion = "11.0.7512.0"
