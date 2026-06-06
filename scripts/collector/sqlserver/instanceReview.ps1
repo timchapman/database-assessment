@@ -28,6 +28,8 @@
     Collection username (required)
 .PARAMETER collectionUserPass
     Collection username password (required)
+.PARAMETER entraIDUserName
+    Microsoft Entra ID username used with sqlcmd -G -U for MFA authentication. No password is supplied.
 .PARAMETER ignorePerfmon
     Signals if the perfmon collection should be skipped (default:false)
 .PARAMETER manualUniqueId
@@ -37,6 +39,8 @@
     Note the script will attempt to collect VM specs using the current users regardless. (default:false)
 .PARAMETER useWindowsAuthentication
     Specifies if the logging to the database will utilize the current Windows Authenticated User or the supplied username / password for SQL Authentication (default:false)
+.PARAMETER useEntraIDAuthentication
+    Specifies if SQL connections will use Microsoft Entra ID authentication through sqlcmd -G -U. This does not use collection username / password parameters.
 .PARAMETER outputDirectory
     User specified output directory if desired to be different from the $PSScriptRoot default
 .EXAMPLE
@@ -55,6 +59,7 @@ Param(
     [Parameter(Mandatory = $false)][string]$database = "all",
     [Parameter(Mandatory = $false)][string]$collectionUserName,
     [Parameter(Mandatory = $false)][string]$collectionUserPass,
+    [Parameter(Mandatory = $false)][string]$entraIDUserName,
     [Parameter(Mandatory = $false)][string]$ignorePerfmon = "false",
     [Parameter(Mandatory = $false)][string]$manualUniqueId = "NA",
     [Parameter(Mandatory = $false)][switch]$collectVMSpecs,
@@ -65,13 +70,300 @@ Param(
 
 Import-Module $PSScriptRoot\dmaCollectorCommonFunctions.psm1
 
-if ($useEntraIDAuthentication -and (-not [string]::IsNullOrEmpty($collectionUserName))) {
+function Get-DmaAzureSqlAccessToken {
+    $sqlServerModule = Get-Module -ListAvailable SqlServer | Sort-Object Version -Descending | Select-Object -First 1
+    if ($null -ne $sqlServerModule) {
+        $sqlServerModulePath = Split-Path $sqlServerModule.Path
+        $msalDll = Get-ChildItem -Path $sqlServerModulePath -Recurse -Filter "Microsoft.Identity.Client.dll" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+        if (-not [string]::IsNullOrEmpty($msalDll)) {
+            Add-Type -Path $msalDll -ErrorAction SilentlyContinue
+
+            $clientId = "04f0c124-f2bc-4f59-8241-bf6df9866bbd"
+            $authority = "https://login.microsoftonline.com/common"
+            $scopes = [string[]]@("https://database.windows.net//.default")
+            $redirectUri = "http://localhost"
+
+            Write-Host "Launching Microsoft Entra interactive sign-in for Azure SQL..."
+            $app = [Microsoft.Identity.Client.PublicClientApplicationBuilder]::Create($clientId).WithAuthority($authority).WithRedirectUri($redirectUri).Build()
+            try {
+                $result = $app.AcquireTokenInteractive($scopes).ExecuteAsync().GetAwaiter().GetResult()
+                if (-not [string]::IsNullOrEmpty($result.AccessToken)) {
+                    return $result.AccessToken
+                }
+            }
+            catch {
+                Write-Host "Microsoft Entra interactive token acquisition failed: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+    }
+
+    if (Get-Command az -ErrorAction SilentlyContinue) {
+        $azAccount = az account show 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "No Azure CLI session found. Launching az login..."
+            az login --allow-no-subscriptions
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "Azure login failed. Exiting." -ForegroundColor Red
+                Exit 1
+            }
+        }
+
+        $token = az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv 2>$null
+        if ($LASTEXITCODE -eq 0 -and (-not [string]::IsNullOrEmpty($token))) {
+            return $token.Trim()
+        }
+    }
+
+    if (Get-Module -ListAvailable Az.Accounts) {
+        try {
+            Import-Module Az.Accounts -ErrorAction Stop
+            if ($null -eq (Get-AzContext -ErrorAction SilentlyContinue)) {
+                Connect-AzAccount -ErrorAction Stop | Out-Null
+            }
+
+            $tokenResult = Get-AzAccessToken -ResourceUrl https://database.windows.net/ -ErrorAction Stop
+            if ($tokenResult.Token -is [securestring]) {
+                return [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResult.Token))
+            }
+            return [string]$tokenResult.Token
+        }
+        catch {
+            Write-Host "Az.Accounts token acquisition failed." -ForegroundColor Yellow
+            Write-Host "    $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host "Entra ID authentication with Invoke-Sqlcmd could not acquire an Azure SQL access token." -ForegroundColor Red
+    Write-Host "Install Azure CLI and run az login, install Az.Accounts and run Connect-AzAccount, or use the modern SqlServer module that includes Microsoft.Identity.Client.dll." -ForegroundColor Red
+    Exit 1
+}
+
+function Convert-DmaSqlcmdValue {
+    param([object]$Value)
+
+    if ($null -eq $Value -or $Value -is [DBNull]) {
+        return ""
+    }
+    return [string]$Value
+}
+
+function Format-DmaInvokeSqlcmdRows {
+    param(
+        [Parameter(ValueFromPipeline = $true)]$Rows,
+        [string]$Separator = " "
+    )
+
+    process {
+        foreach ($row in @($Rows)) {
+            if ($null -eq $row) {
+                continue
+            }
+
+            if ($row -is [System.Data.DataRow]) {
+                $values = foreach ($column in $row.Table.Columns) {
+                    Convert-DmaSqlcmdValue -Value $row[$column.ColumnName]
+                }
+                $values -join $Separator
+            }
+            elseif ($row -is [System.Data.DataTable]) {
+                foreach ($dataRow in $row.Rows) {
+                    $values = foreach ($column in $row.Columns) {
+                        Convert-DmaSqlcmdValue -Value $dataRow[$column.ColumnName]
+                    }
+                    $values -join $Separator
+                }
+            }
+            else {
+                $properties = $row.PSObject.Properties | Where-Object { $_.MemberType -in @("Property", "NoteProperty") }
+                if ($properties.Count -eq 0) {
+                    [string]$row
+                }
+                else {
+                    ($properties | ForEach-Object { Convert-DmaSqlcmdValue -Value $_.Value }) -join $Separator
+                }
+            }
+        }
+    }
+}
+
+function Convert-DmaSqlcmdVariableValue {
+    param([string]$Value)
+
+    if ($null -eq $Value) {
+        return ""
+    }
+
+    $trimmedValue = $Value.Trim()
+    if ($trimmedValue.Length -ge 2 -and $trimmedValue.StartsWith('"') -and $trimmedValue.EndsWith('"')) {
+        return $trimmedValue.Substring(1, $trimmedValue.Length - 2)
+    }
+    return $Value
+}
+
+function Initialize-DmaEntraOdbcConnection {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServerInstance,
+        [Parameter(Mandatory = $true)][string]$DatabaseName
+    )
+
+    if ($null -ne $script:DmaEntraOdbcConnection -and $script:DmaEntraOdbcConnection.State -eq [System.Data.ConnectionState]::Open) {
+        return
+    }
+
+    $connectionString = "Driver={ODBC Driver 17 for SQL Server};Server=$ServerInstance;Database=$DatabaseName;Authentication=ActiveDirectoryInteractive;UID=$script:DmaEntraIDUserName;Encrypt=yes;TrustServerCertificate=yes;Connection Timeout=30;"
+    $script:DmaEntraOdbcConnection = [System.Data.Odbc.OdbcConnection]::new($connectionString)
+    $script:DmaEntraOdbcConnection.Open()
+}
+
+function Invoke-DmaEntraSql {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServerInstance,
+        [Parameter(Mandatory = $false)][string]$DatabaseName = "master",
+        [Parameter(Mandatory = $true)][string]$InputFile,
+        [Parameter(Mandatory = $false)][string]$Separator = " ",
+        [Parameter(Mandatory = $false)][bool]$IncludeHeaders = $true,
+        [Parameter(Mandatory = $false)][hashtable]$Variables = @{}
+    )
+
+    $DatabaseName = (Convert-DmaSqlcmdVariableValue -Value $DatabaseName)
+    if ([string]::IsNullOrEmpty($DatabaseName)) {
+        $DatabaseName = "master"
+    }
+
+    Initialize-DmaEntraOdbcConnection -ServerInstance $ServerInstance -DatabaseName $DatabaseName
+
+    $sqlText = Get-Content -Path $InputFile -Raw
+    foreach ($key in $Variables.Keys) {
+        $sqlText = $sqlText.Replace('$(' + $key + ')', [string]$Variables[$key])
+    }
+
+    if ($script:DmaEntraOdbcConnection.Database -ne $DatabaseName) {
+        $script:DmaEntraOdbcConnection.ChangeDatabase($DatabaseName)
+    }
+
+    $command = $script:DmaEntraOdbcConnection.CreateCommand()
+    $command.CommandTimeout = 0
+    $command.CommandText = $sqlText
+
+    $adapter = [System.Data.Odbc.OdbcDataAdapter]::new($command)
+    $dataSet = [System.Data.DataSet]::new()
+    [void]$adapter.Fill($dataSet)
+
+    foreach ($table in $dataSet.Tables) {
+        if ($IncludeHeaders) {
+            $headers = foreach ($column in $table.Columns) {
+                $column.ColumnName
+            }
+            $headers -join $Separator
+        }
+        foreach ($row in $table.Rows) {
+            $values = foreach ($column in $table.Columns) {
+                Convert-DmaSqlcmdValue -Value $row[$column.ColumnName]
+            }
+            $values -join $Separator
+        }
+    }
+}
+
+function sqlcmd {
+    $SqlcmdArgs = $args
+
+    if (-not $script:UseEntraOdbcForSqlcmd) {
+        & $script:NativeSqlcmdPath @SqlcmdArgs
+        return
+    }
+
+    $serverInstance = $null
+    $databaseName = "master"
+    $inputFile = $null
+    $separator = " "
+    $includeHeaders = $true
+    $variables = @{}
+
+    for ($i = 0; $i -lt $SqlcmdArgs.Count; $i++) {
+        $arg = [string]$SqlcmdArgs[$i]
+        switch -Regex ($arg) {
+            '^-S$' {
+                $i++
+                $serverInstance = [string]$SqlcmdArgs[$i]
+                continue
+            }
+            '^-d$' {
+                $i++
+                $databaseName = [string]$SqlcmdArgs[$i]
+                continue
+            }
+            '^-i$' {
+                $i++
+                $inputFile = [string]$SqlcmdArgs[$i]
+                continue
+            }
+            '^-h-1$' {
+                $includeHeaders = $false
+                continue
+            }
+            '^-h$' {
+                $i++
+                if ([string]$SqlcmdArgs[$i] -eq "-1") {
+                    $includeHeaders = $false
+                }
+                continue
+            }
+            '^-s(.+)$' {
+                $separator = $Matches[1].Trim('"')
+                continue
+            }
+            '^-s$' {
+                $i++
+                $separator = ([string]$SqlcmdArgs[$i]).Trim('"')
+                continue
+            }
+            '^-v$' {
+                while (($i + 1) -lt $SqlcmdArgs.Count) {
+                    $nextArg = [string]$SqlcmdArgs[$i + 1]
+                    if ($nextArg -match '^-' -and $nextArg -notmatch '=') {
+                        break
+                    }
+                    $nameValue = $nextArg -split '=', 2
+                    if ($nameValue.Count -eq 2) {
+                        $variables[$nameValue[0]] = Convert-DmaSqlcmdVariableValue -Value $nameValue[1]
+                    }
+                    $i++
+                }
+                continue
+            }
+        }
+    }
+
+    if ([string]::IsNullOrEmpty($serverInstance) -or [string]::IsNullOrEmpty($inputFile)) {
+        throw "The internal Entra ID sqlcmd wrapper could not parse the sqlcmd arguments: $($SqlcmdArgs -join ' ')"
+    }
+
+    Invoke-DmaEntraSql -ServerInstance $serverInstance -DatabaseName $databaseName -InputFile $inputFile -Separator $separator -IncludeHeaders $includeHeaders -Variables $variables
+}
+
+if ($useEntraIDAuthentication -and $useWindowsAuthentication) {
+    Write-Host "-useEntraIDAuthentication and -useWindowsAuthentication are mutually exclusive." -ForegroundColor Red
+    Exit 1
+}
+
+if ($useEntraIDAuthentication -and ((-not [string]::IsNullOrEmpty($collectionUserName)) -or (-not [string]::IsNullOrEmpty($collectionUserPass)))) {
     Write-Host "-collectionUserName / -collectionUserPass must not be supplied with -useEntraIDAuthentication." -ForegroundColor Red
-    Write-Host "Authentication identity comes from the Azure CLI session (az login)." -ForegroundColor Red
+    Write-Host "Authentication identity comes from the Microsoft Entra ID interactive MFA sign-in flow." -ForegroundColor Red
     Exit 1
 }
 
 $powerShellVersion = $PSVersionTable.PSVersion.Major
+$sqlcmdCommand = Get-Command sqlcmd.exe -ErrorAction SilentlyContinue
+if ($null -eq $sqlcmdCommand) {
+    Write-Host "sqlcmd is required but was not found in PATH." -ForegroundColor Red
+    Exit 1
+}
+$sqlcmdVersion = $sqlcmdCommand.Version
+$script:NativeSqlcmdPath = $sqlcmdCommand.Source
+$script:UseEntraOdbcForSqlcmd = $false
+$script:DmaEntraIDUserName = $null
+$script:DmaEntraOdbcConnection = $null
 $foldername = ""
 $totalErrorCount = 0
 
@@ -94,7 +386,7 @@ if ($ignorePerfmon -eq "true") {
     Write-Host ""
     $ignorePerfmonAck = Read-Host -Prompt "Acknowledge with a 'Y' to Continue"
 
-    if ($ignorePerfmonAck.ToUpper() -ne "Y") {
+    if ([string]::IsNullOrEmpty($ignorePerfmonAck) -or ($ignorePerfmonAck.ToUpper() -ne "Y")) {
         Write-Host "Did not Acknowldege Perfmon Warning..."
         Write-Host "Exiting Collector......."
         Exit
@@ -154,34 +446,29 @@ else {
 }
 
 if ($useEntraIDAuthentication) {
-    if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
-        Write-Host "Azure CLI (az) is required for Entra ID authentication. Install from https://aka.ms/installazurecliwindows" -ForegroundColor Red
+    if ([string]::IsNullOrEmpty($entraIDUserName)) {
+        Write-Host "-entraIDUserName must be supplied with -useEntraIDAuthentication." -ForegroundColor Red
+        Write-Host "Example: -useEntraIDAuthentication -entraIDUserName user@domain.com" -ForegroundColor Red
         Exit 1
     }
-    $sqlcmdHelp = & sqlcmd --help 2>&1
-    if ($sqlcmdHelp -notmatch "go-sqlcmd") {
-        Write-Host "go-sqlcmd is required for Entra ID authentication. Install from https://github.com/microsoft/go-sqlcmd" -ForegroundColor Red
-        Exit 1
-    }
-    $azAccount = az account show 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "No Azure CLI session found. Launching az login..."
-        az login
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Azure login failed. Exiting." -ForegroundColor Red
-            Exit 1
-        }
-    }
-    $entraUpn = (az account show --query user.name -o tsv 2>$null).Trim()
+
+    Remove-Item -Path env:SQLCMDUSER -ErrorAction SilentlyContinue
+    Remove-Item -Path env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
     Write-Host ""
     Write-Host "#############################################################"
     Write-Host "#                                                           #"
     Write-Host "#    Executing Collection with Entra ID Authentication      #"
     Write-Host "#                                                           #"
     Write-Host "#############################################################"
-    Write-Host "    Signed in as: $entraUpn"
+    Write-Host "    No collection username or password will be passed."
+    Write-Host "    Entra ID sign-in user: $entraIDUserName"
+    Write-Host "    sqlcmd path: $($sqlcmdCommand.Source)"
+    Write-Host "    sqlcmd version: $sqlcmdVersion"
+    Write-Host "    Entra ID collection will use one persistent ODBC connection."
     Write-Host ""
-    $sqlcmdAuthArgs = @("--authentication-method", "ActiveDirectoryDefault")
+    $script:DmaEntraIDUserName = $entraIDUserName
+    $script:UseEntraOdbcForSqlcmd = $true
+    $sqlcmdAuthArgs = @()
 } else {
     $sqlcmdAuthArgs = @()
 }
@@ -260,7 +547,6 @@ function sqlcmd {
 }
 
 if (-not $useEntraIDAuthentication) {
-$sqlcmdVersion = Get-Command sqlcmd | Select-Object -ExpandProperty Version
 $requiredVersion = "11.0.7512.0"
 if ($sqlcmdVersion -lt $requiredVersion) {
     Write-Host "#############################################################"
@@ -364,6 +650,9 @@ $values = $splitobj | ForEach-Object { if ($_.Trim() -ne '') { $_ } }
 
 $dbversion = $values[0].Replace('.', '')
 $machinename = $values[1]
+if ($machinename.Contains('.')) {
+    $machinename = $machinename.Split('.')[0]
+}
 if ([string]$database -eq "all") {
     $dbname = $values[2] -replace '\s', ''
 }
@@ -524,6 +813,9 @@ WriteLog -logLocation $foldername\$logFile -logMessage "port = $port " -logOpera
 WriteLog -logLocation $foldername\$logFile -logMessage "database = $databaseNameFilter " -logOperation "FILE"
 if ($useWindowsAuthentication) {
     WriteLog -logLocation $foldername\$logFile -logMessage "collectionUserName = $(whoami) " -logOperation "FILE"
+}
+elseif ($useEntraIDAuthentication) {
+    WriteLog -logLocation $foldername\$logFile -logMessage "collectionUserName = Microsoft Entra ID interactive authentication" -logOperation "FILE"
 }
 else {
     WriteLog -logLocation $foldername\$logFile -logMessage "collectionUserName = $collectionUserName " -logOperation "FILE"
@@ -927,6 +1219,11 @@ if (-not ([string]::IsNullOrEmpty($originalLocation)) -and ($originalLocation -n
     $currentTimestamp = "[{0:MM/dd/yy} {0:HH:mm:ss}]" -f (Get-Date)
     Write-Host "$currentTimestamp   Changing directory back to: $originalLocation"
     Pop-Location
+}
+
+if ($null -ne $script:DmaEntraOdbcConnection) {
+    $script:DmaEntraOdbcConnection.Close()
+    $script:DmaEntraOdbcConnection.Dispose()
 }
 
 Exit 0
