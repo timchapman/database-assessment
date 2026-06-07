@@ -11,7 +11,7 @@ The Managed Instance endpoint.
 For a public endpoint this is usually the full public DNS name, for example:
 
 ```text
-sqlmi003centralus.public.8f8186726aad.database.windows.net
+<managed-instance-name>.public.<dns-zone>.database.windows.net
 ```
 
 `-port`
@@ -59,7 +59,7 @@ Optional label written into output files. If supplied, use only letters and numb
 Example:
 
 ```text
--manualUniqueId SQLMI003
+-manualUniqueId SQLMI001
 ```
 
 ## Do Not Pass These with Entra ID Auth
@@ -85,19 +85,19 @@ C:\DMA\database-assessment\scripts\collector\sqlserver
 Command:
 
 ```bat
-.\runAssessment.bat -serverName sqlmi003centralus.public.8f8186726aad.database.windows.net -port 3342 -ignorePerfmon true -useEntraIDAuthentication -entraIDUserName chapmantis@hotmail.com
+.\runAssessment.bat -serverName <managed-instance-name>.public.<dns-zone>.database.windows.net -port 3342 -ignorePerfmon true -useEntraIDAuthentication -entraIDUserName user@domain.com
 ```
 
 With a manual ID:
 
 ```bat
-.\runAssessment.bat -serverName sqlmi003centralus.public.8f8186726aad.database.windows.net -port 3342 -ignorePerfmon true -manualUniqueId SQLMI003 -useEntraIDAuthentication -entraIDUserName chapmantis@hotmail.com
+.\runAssessment.bat -serverName <managed-instance-name>.public.<dns-zone>.database.windows.net -port 3342 -ignorePerfmon true -manualUniqueId SQLMI001 -useEntraIDAuthentication -entraIDUserName user@domain.com
 ```
 
 For one database only:
 
 ```bat
-.\runAssessment.bat -serverName sqlmi003centralus.public.8f8186726aad.database.windows.net -port 3342 -database AdventureWorks -ignorePerfmon true -useEntraIDAuthentication -entraIDUserName chapmantis@hotmail.com
+.\runAssessment.bat -serverName <managed-instance-name>.public.<dns-zone>.database.windows.net -port 3342 -database AdventureWorks -ignorePerfmon true -useEntraIDAuthentication -entraIDUserName user@domain.com
 ```
 
 ## Expected Behavior
@@ -121,13 +121,13 @@ Return file C:\DMA\database-assessment\scripts\collector\sqlserver\opdb_mssql_No
 This path was verified against:
 
 ```text
-sqlmi003centralus.public.8f8186726aad.database.windows.net,3342
+<managed-instance-name>.public.<dns-zone>.database.windows.net,3342
 ```
 
 using:
 
 ```text
--useEntraIDAuthentication -entraIDUserName chapmantis@hotmail.com
+-useEntraIDAuthentication -entraIDUserName user@domain.com
 ```
 
 The collector completed and produced an assessment zip.
