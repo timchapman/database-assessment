@@ -2,6 +2,28 @@
 
 This collector supports Azure SQL Managed Instance collection using Microsoft Entra ID MFA. In this mode, do not pass a SQL collection username or password. The collector opens one persistent ODBC connection using the Entra ID user you provide, then reuses that connection for the SQL metadata queries.
 
+## Required PowerShell Modules
+
+The following PowerShell modules are required before running the Managed Instance Entra ID collection path:
+
+```text
+Az.Accounts
+SqlServer
+```
+
+The `SqlServer` module must be version `22.3.0`. Remove other installed versions and install the required version:
+
+```powershell
+Uninstall-Module -Name SqlServer -AllVersions
+Install-Module -Name SqlServer -RequiredVersion 22.3.0 -Force -AllowClobber
+```
+
+Install `Az.Accounts` if it is not already installed:
+
+```powershell
+Install-Module -Name Az.Accounts -Force -AllowClobber
+```
+
 ## Required Parameters
 
 `-serverName`
