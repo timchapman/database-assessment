@@ -19,7 +19,7 @@ IF @ASSESSMENT_DATABSE_NAME = 'all'
 
 BEGIN TRY
     DECLARE @tableCount INT, @functionCount INT, @viewCount INT, @procCount INT, @trigCount INT;
-    
+
     SELECT @tableCount = COUNT(*) FROM sys.tables WHERE is_ms_shipped = 0;
     SELECT @functionCount = COUNT(*) FROM sys.objects WHERE type IN ('FN', 'IF', 'TF') AND is_ms_shipped = 0;
     SELECT @viewCount = COUNT(*) FROM sys.views WHERE is_ms_shipped = 0;

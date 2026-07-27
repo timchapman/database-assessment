@@ -47,7 +47,7 @@ CREATE TABLE #LinkedServers (
 
 BEGIN TRY
     INSERT INTO #LinkedServers
-    SELECT 
+    SELECT
         name, product, provider, data_source, location, provider_string, catalog
     FROM sys.servers
     WHERE is_linked = 1 AND server_id <> 0;
