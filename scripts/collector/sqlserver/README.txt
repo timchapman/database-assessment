@@ -32,12 +32,12 @@ Operating System Versions:
     The collection script depends on the following executables to be available on the machine from which it is run.  The script is also expected to be run from a Windows machine:
     command shell (in administrator mode)
     powershell (version 5 or greater)
-    sqlcmd.exe (version 11.0.7512.11 or greater)
+    sqlcmd.exe (ODBC version 11.0.7512.11+ or Microsoft Go sqlcmd 1.x+)
 
         Note:
         ----------------------
-        Ensure that the "ODBC" version of "sqlcmd" is used
-        Ensure that "sqlcmd" is also in your "$PATH" variable
+        Both Microsoft ODBC sqlcmd and modern Microsoft Go sqlcmd (go-sqlcmd) are supported.
+        Ensure that "sqlcmd" is in your "$PATH" variable.
 
 2. Preparation
 --------------

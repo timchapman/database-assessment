@@ -1,3 +1,4 @@
+# Author: Tim Chapman
 # Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -65,7 +66,7 @@ if ([string]::IsNullorEmpty($collectionUserName)) {
     Exit 1
 }
 
-$validSQLInstanceVersionCheckArray = @(sqlcmd -S $serverName -i sql\checkValidInstanceVersion.sql -d master -C -l 30 -W -m 1 -u -h-1 -w 32768)
+$validSQLInstanceVersionCheckArray = @(sqlcmd -S $serverName -i sql\checkValidInstanceVersion.sql -d master -C -l 30 -W -m 1 -u -h -1 -w 32768)
 $splitValidInstanceVerisionCheckObj = $validSQLInstanceVersionCheckArray[0].Split('')
 $validSQLInstanceVersionCheckValues = $splitValidInstanceVerisionCheckObj | ForEach-Object { if ($_.Trim() -ne '') { $_ } }
 
@@ -78,10 +79,10 @@ if ($isCloudOrLinuxHost -eq "AZURE") {
 
 if (([string]::IsNullorEmpty($port)) -or ($port -eq "default")) {
     Write-Output "Creating Collection User in $serverName"
-    sqlcmd -S $serverName -i sql\createCollectionUser.sql -d master -C -l 30 -m 1 -v collectionUser=$collectionUserName collectionPass=$collectionUserPass
+    sqlcmd -S $serverName -i sql\createCollectionUser.sql -d master -C -l 30 -m 1 -v collectionUser=$collectionUserName -v collectionPass=$collectionUserPass
 }
 else {
     $serverName = "$serverName,$port"
     Write-Output "Creating Collection User in $serverName, using PORT $port"
-    sqlcmd -S $serverName -i sql\createCollectionUser.sql -d master -C -l 30 -m 1 -v collectionUser=$collectionUserName collectionPass=$collectionUserPass
+    sqlcmd -S $serverName -i sql\createCollectionUser.sql -d master -C -l 30 -m 1 -v collectionUser=$collectionUserName -v collectionPass=$collectionUserPass
 }

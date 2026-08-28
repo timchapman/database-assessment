@@ -140,6 +140,7 @@ build-collector: 										## Build the collector SQL scripts.
 	@cp scripts/collector/sqlserver/*.ps1 $(BUILD_DIR)/collector/sqlserver/
 	@cp scripts/collector/sqlserver/*.psm1 $(BUILD_DIR)/collector/sqlserver/
 	@cp scripts/collector/sqlserver/README.txt $(BUILD_DIR)/collector/sqlserver/
+	@cp scripts/collector/sqlserver/*.md $(BUILD_DIR)/collector/sqlserver/ 2>/dev/null || true
 	@cp  LICENSE $(BUILD_DIR)/collector/sqlserver
 	@echo "Database Migration Assessment Collector version $(VERSION) ($(COMMIT_SHA))" > $(BUILD_DIR)/collector/sqlserver/VERSION.txt
 

@@ -1,4 +1,5 @@
 /*
+-- Author: Tim Chapman
 Copyright 2024 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -372,6 +373,26 @@ BEGIN
         exec('INSERT INTO #serverProperties SELECT ''AvailabilityGroupCount'', count(*) FROM sys.availability_groups /* SQL Server 2012 (11.x) and above */')
     END;
 END;
+
+-- Check for Contained Availability Groups (SQL Server 2022+)
+IF @PRODUCT_VERSION >= 16
+BEGIN
+    BEGIN TRY
+        exec('INSERT INTO #serverProperties
+              SELECT ''ContainedAGCount'',
+                     CONVERT(NVARCHAR(255), COUNT(*))
+              FROM sys.availability_groups
+              WHERE is_contained = 1');
+    END TRY
+    BEGIN CATCH
+        exec('INSERT INTO #serverProperties SELECT ''ContainedAGCount'', ''0''');
+    END CATCH
+END
+ELSE
+BEGIN
+    exec('INSERT INTO #serverProperties SELECT ''ContainedAGCount'', ''0''');
+END;
+
 
 SELECT
     '"' + @PKEY + '"'  as PKEY,

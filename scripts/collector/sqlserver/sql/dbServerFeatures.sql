@@ -1,4 +1,5 @@
 /*
+-- Author: Tim Chapman
 Copyright 2024 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -763,6 +764,66 @@ BEGIN
                 exec('INSERT INTO #FeaturesEnabled SELECT ''IsBufferPoolExtensionEnabled'', ''0'', 0 /* SQL Server 2014 (13.x) below */');
     END CATCH
 END
+
+-- Performance Data Collector Check
+IF EXISTS (SELECT 1 FROM sys.databases WHERE name = 'msdb' AND HAS_DBACCESS('msdb') = 1)
+   AND OBJECT_ID('msdb.dbo.syscollector_collection_sets') IS NOT NULL
+BEGIN
+    exec('INSERT INTO #FeaturesEnabled
+          SELECT ''PerformanceDataCollectorActive'',
+                 CASE WHEN COUNT(*) > 0 THEN ''1'' ELSE ''0'' END,
+                 COUNT(*)
+          FROM msdb.dbo.syscollector_collection_sets
+          WHERE is_running = 1');
+END
+ELSE
+BEGIN
+    INSERT INTO #FeaturesEnabled VALUES ('PerformanceDataCollectorActive', '0', 0);
+END;
+
+-- Database Snapshots Count
+INSERT INTO #FeaturesEnabled
+SELECT
+    'DatabaseSnapshotsCount',
+    CASE WHEN COUNT(*) > 0 THEN '1' ELSE '0' END,
+    COUNT(*)
+FROM sys.databases
+WHERE source_database_id IS NOT NULL;
+
+-- Check for Enclave-enabled Column Master Keys (SQL Server 2019+)
+IF @PRODUCT_VERSION >= 15
+BEGIN
+    BEGIN TRY
+        exec('INSERT INTO #FeaturesEnabled
+              SELECT ''EnclaveEnabledKeysCount'',
+                     CASE WHEN COUNT(*) > 0 THEN ''1'' ELSE ''0'' END,
+                     COUNT(*)
+              FROM sys.column_master_keys
+              WHERE allow_enclave_computations = 1');
+    END TRY
+    BEGIN CATCH
+        INSERT INTO #FeaturesEnabled VALUES ('EnclaveEnabledKeysCount', '0', 0);
+    END CATCH
+END
+ELSE
+BEGIN
+    INSERT INTO #FeaturesEnabled VALUES ('EnclaveEnabledKeysCount', '0', 0);
+END;
+
+-- Check for xp_cmdshell configuration
+BEGIN TRY
+    INSERT INTO #FeaturesEnabled
+    SELECT
+        'IsXpCmdshellEnabled',
+        CASE WHEN CAST(value_in_use AS INT) = 1 THEN '1' ELSE '0' END,
+        CAST(value_in_use AS INT)
+    FROM sys.configurations
+    WHERE name = 'xp_cmdshell';
+END TRY
+BEGIN CATCH
+    INSERT INTO #FeaturesEnabled VALUES ('IsXpCmdshellEnabled', '0', 0);
+END CATCH;
+
 
 SELECT
     '"' + @PKEY + '"' as PKEY,

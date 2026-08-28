@@ -1,3 +1,4 @@
+# Author: Tim Chapman
 # Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -82,7 +83,7 @@ if ([string]::IsNullorEmpty($collectionUserName)) {
     Exit 1
 }
 
-$validSQLInstanceVersionCheckArray = @(sqlcmd -S $serverName -i sql\checkValidInstanceVersion.sql -d master -U $user -P $pass -C -l 30 -W -m 1 -u -h-1 -w 32768)
+$validSQLInstanceVersionCheckArray = @(sqlcmd -S $serverName -i sql\checkValidInstanceVersion.sql -d master -U $user -P $pass -C -l 30 -W -m 1 -u -h -1 -w 32768)
 $splitValidInstanceVerisionCheckObj = $validSQLInstanceVersionCheckArray[0].Split('')
 $validSQLInstanceVersionCheckValues = $splitValidInstanceVerisionCheckObj | ForEach-Object { if ($_.Trim() -ne '') { $_ } }
 # $isValidSQLInstanceVersion = $validSQLInstanceVersionCheckValues[0]
@@ -90,11 +91,11 @@ $isCloudOrLinuxHost = $validSQLInstanceVersionCheckValues[1]
 
 if (([string]::IsNullorEmpty($port)) -or ($port -eq "default")) {
     WriteLog -logMessage "Creating collection user in $serverName" -logOperation "MESSAGE"
-    sqlcmd -S $serverName -i sql\createCollectionUser.sql -d master -U $user -P $pass -C -l 30 -m 1 -v collectionUser=$collectionUserName collectionPass=$collectionUserPass
+    sqlcmd -S $serverName -i sql\createCollectionUser.sql -d master -U $user -P $pass -C -l 30 -m 1 -v collectionUser=$collectionUserName -v collectionPass=$collectionUserPass
 
     ### If Azure, need to get a list of databases from master and log in to each individually to create the user
     if ($isCloudOrLinuxHost -eq "AZURE") {
-        $dbNameArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -U $collectionUserName -P $collectionUserPass -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database="all" -v hasdbaccess=1)
+        $dbNameArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -U $collectionUserName -P $collectionUserPass -C -l 30 -W -m 1 -u -h -1 -w 32768 -v database="all" -v hasdbaccess=1)
         foreach ($databaseName in $dbNameArray) {
             WriteLog -logMessage "Adding collection user into the following databases:" -logOperation "MESSAGE"
             WriteLog -logMessage "            $databaseName" -logOperation "MESSAGE"
@@ -107,11 +108,11 @@ if (([string]::IsNullorEmpty($port)) -or ($port -eq "default")) {
 else {
     $serverName = "$serverName,$port"
     WriteLog -logMessage "Creating collection user in $serverName, using PORT $port" -logOperation "MESSAGE"
-    sqlcmd -S $serverName -i sql\createCollectionUser.sql -d master -U $user -P $pass -C -l 30 -m 1 -v collectionUser=$collectionUserName collectionPass=$collectionUserPass
+    sqlcmd -S $serverName -i sql\createCollectionUser.sql -d master -U $user -P $pass -C -l 30 -m 1 -v collectionUser=$collectionUserName -v collectionPass=$collectionUserPass
 
     ### If Azure, need to get a list of databases from master and log in to each individually to create the user
     if ($isCloudOrLinuxHost -eq "AZURE") {
-        $dbNameArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -U $collectionUserName -P $collectionUserPass -C -l 30 -W -m 1 -u -h-1 -w 32768 -v database="all" -v hasdbaccess=1)
+        $dbNameArray = @(sqlcmd -S $serverName -i sql\getDBList.sql -d master -U $collectionUserName -P $collectionUserPass -C -l 30 -W -m 1 -u -h -1 -w 32768 -v database="all" -v hasdbaccess=1)
         foreach ($databaseName in $dbNameArray) {
             WriteLog -logMessage "Adding Azure collection user into the following databases:" -logOperation "MESSAGE"
             WriteLog -logMessage "            $databaseName" -logOperation "MESSAGE"

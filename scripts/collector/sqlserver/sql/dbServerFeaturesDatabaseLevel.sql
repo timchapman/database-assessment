@@ -1,4 +1,5 @@
 /*
+-- Author: Tim Chapman
 Copyright 2023 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -138,6 +139,41 @@ BEGIN
             WAITFOR DELAY '00:00:00'
     END CATCH
 END
+
+-- External Languages Check (SQL Server 2019+)
+IF @PRODUCT_VERSION >= 15
+BEGIN
+    BEGIN TRY
+        exec('INSERT INTO #FeaturesEnabledDbLevel
+              SELECT db_name(),
+                     ''ExternalLanguagesCount'',
+                     CASE WHEN COUNT(*) > 0 THEN ''1'' ELSE ''0'' END,
+                     COUNT(*)
+              FROM sys.external_languages');
+    END TRY
+    BEGIN CATCH
+        exec('INSERT INTO #FeaturesEnabledDbLevel SELECT db_name(), ''ExternalLanguagesCount'', ''0'', 0');
+    END CATCH
+END
+ELSE
+BEGIN
+    exec('INSERT INTO #FeaturesEnabledDbLevel SELECT db_name(), ''ExternalLanguagesCount'', ''0'', 0');
+END;
+
+-- User Assemblies Count (CLR)
+BEGIN TRY
+    exec('INSERT INTO #FeaturesEnabledDbLevel
+          SELECT db_name(),
+                 ''UserAssembliesCount'',
+                 CASE WHEN COUNT(*) > 0 THEN ''1'' ELSE ''0'' END,
+                 COUNT(*)
+          FROM sys.assemblies
+          WHERE is_user_defined = 1');
+END TRY
+BEGIN CATCH
+    exec('INSERT INTO #FeaturesEnabledDbLevel SELECT db_name(), ''UserAssembliesCount'', ''0'', 0');
+END CATCH
+
 
 SELECT
     '"' + @PKEY + '"' as PKEY,
