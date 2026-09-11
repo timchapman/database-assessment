@@ -230,13 +230,10 @@ if ($useEntraIDAuthentication) {
     Write-Host ""
 }
 
-# Persistent shared ADO.NET connection for Entra ID MFA (guaranteeing exactly ONE interactive prompt)
-# and for executing queries when sqlcmd is wrapped.
+# Persistent shared ADO.NET connection engine across all authentication modes
+# Guarantees single-session reuse, high performance, and eliminates process spawn overhead.
 function sqlcmd {
-    if (-not $useEntraIDAuthentication) {
-        & $script:NativeSqlcmdPath @args
-        return
-    }
+    param()
 
     $serverInstance = $serverName
     $inputFile = ""
@@ -259,9 +256,8 @@ function sqlcmd {
         }
     }
 
-    if (-not $global:persistentSqlConn) {
-        Import-Module SqlServer -ErrorAction SilentlyContinue
-        $connStr = "Server=$serverInstance;Database=$dbName;TrustServerCertificate=True"
+    if (-not $global:persistentSqlConn -or $global:persistentSqlConn.State -ne 'Open') {
+        $connStr = "Server=$serverInstance;Database=master;TrustServerCertificate=True"
         if ($useEntraIDAuthentication) {
             $connStr += ";Authentication=Active Directory Interactive"
             if ($entraIDUserName) { $connStr += ";User ID=$entraIDUserName" }
@@ -272,40 +268,58 @@ function sqlcmd {
         }
 
         try {
+            # Tier 1: Modern Microsoft.Data.SqlClient (if available)
             $global:persistentSqlConn = New-Object Microsoft.Data.SqlClient.SqlConnection($connStr)
+            $global:persistentSqlConn.Open()
         } catch {
-            $global:persistentSqlConn = New-Object System.Data.SqlClient.SqlConnection($connStr)
-        }
-        $global:persistentSqlConn.Open()
-    } else {
-        if ($global:persistentSqlConn.Database -ne $dbName) {
-            $global:persistentSqlConn.ChangeDatabase($dbName)
+            try {
+                # Tier 2: Universal built-in System.Data.SqlClient (Standard Windows .NET Framework GAC)
+                $global:persistentSqlConn = New-Object System.Data.SqlClient.SqlConnection($connStr)
+                $global:persistentSqlConn.Open()
+            } catch {
+                # Tier 3: Ultimate fallback to native CLI process
+                & $script:NativeSqlcmdPath @args
+                return
+            }
         }
     }
 
-    if ($inputFile -and (Test-Path $inputFile)) {
-        $query = (Get-Content $inputFile -Raw)
-        foreach ($varKey in $variables.Keys) {
-            $query = $query.Replace("`$($varKey)", "$($variables[$varKey])")
-        }
-
-        $cmd = $global:persistentSqlConn.CreateCommand()
-        $cmd.CommandText = $query
-        $cmd.CommandTimeout = 300
-
-        try {
-            $reader = $cmd.ExecuteReader()
-            while ($reader.Read()) {
-                $rowVals = @()
-                for ($c = 0; $c -lt $reader.FieldCount; $c++) {
-                    $rowVals += "$($reader.GetValue($c))"
-                }
-                $rowVals -join "|"
+    if ($global:persistentSqlConn -and $global:persistentSqlConn.State -eq 'Open') {
+        if ($global:persistentSqlConn.Database -ne $dbName) {
+            try {
+                $global:persistentSqlConn.ChangeDatabase($dbName)
+            } catch {
+                Write-Warning "Could not switch context to database [$dbName]: $($_.Exception.Message)"
+                return
             }
-            $reader.Close()
-        } catch {
-            Write-Error $_.Exception.Message
         }
+
+        if ($inputFile -and (Test-Path $inputFile)) {
+            $query = (Get-Content $inputFile -Raw)
+            foreach ($varKey in $variables.Keys) {
+                $query = $query.Replace("`$($varKey)", "$($variables[$varKey])")
+            }
+
+            $cmd = $global:persistentSqlConn.CreateCommand()
+            $cmd.CommandText = $query
+            $cmd.CommandTimeout = 300
+
+            try {
+                $reader = $cmd.ExecuteReader()
+                while ($reader.Read()) {
+                    $rowVals = @()
+                    for ($c = 0; $c -lt $reader.FieldCount; $c++) {
+                        $rowVals += "$($reader.GetValue($c))"
+                    }
+                    $rowVals -join "|"
+                }
+                $reader.Close()
+            } catch {
+                Write-Error "Error executing $inputFile : $($_.Exception.Message)"
+            }
+        }
+    } else {
+        & $script:NativeSqlcmdPath @args
     }
 }
 
@@ -519,6 +533,12 @@ else {
     $memoryUsageFileNameShort = 'memory_usage.csv'
     $memoryUsageFileNameLong  = 'opdb' + '__' + 'MemoryUsage' + $outputFileSuffix
 
+    $memorySizingFileNameShort = 'memory_sizing.csv'
+    $memorySizingFileNameLong  = 'opdb' + '__' + 'MemorySizing' + $outputFileSuffix
+
+    $memoryClerksFileNameShort = 'memory_clerks.csv'
+    $memoryClerksFileNameLong  = 'opdb' + '__' + 'MemoryClerks' + $outputFileSuffix
+
     $batchFootprintFileNameShort = 'batch_footprint.csv'
     $batchFootprintFileNameLong  = 'opdb' + '__' + 'BatchFootprint' + $outputFileSuffix
 
@@ -579,6 +599,8 @@ else {
         $databaseLevelBlockingFeaturesShort,
         $cpuUsageFileNameShort,
         $memoryUsageFileNameShort,
+        $memorySizingFileNameShort,
+        $memoryClerksFileNameShort,
         $batchFootprintFileNameShort,
         $waitsStatsShort,
         $queryOptimizerInfoShort,
@@ -644,6 +666,16 @@ else {
     sqlcmd -S $serverName -i sql\memoryUsage.sql -d master -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$memoryUsageFileNameShort -Encoding utf8
     Update-DmaManifest -shortName $memoryUsageFileNameShort -longName $memoryUsageFileNameLong
 
+    WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Memory Sizing Info..." -logOperation "BOTH"
+    Set-Content -Path $foldername\$memorySizingFileNameShort -Encoding utf8 -Value '"PKEY"|"host_ram_mb"|"available_host_ram_mb"|"max_server_memory_mb"|"min_server_memory_mb"|"sql_working_set_mb"|"memory_model"|"user_data_on_disk_mb"|"buffer_pool_user_data_mb"|"lifetime_pressure_events"|"internal_sql_pressure_events"|"external_os_pressure_events"|"dma_source_id"|"dma_manual_id"'
+    sqlcmd -S $serverName -i sql\memorySizing.sql -d master -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$memorySizingFileNameShort -Encoding utf8
+    Update-DmaManifest -shortName $memorySizingFileNameShort -longName $memorySizingFileNameLong
+
+    WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Memory Clerks Breakdown..." -logOperation "BOTH"
+    Set-Content -Path $foldername\$memoryClerksFileNameShort -Encoding utf8 -Value '"PKEY"|"memory_clerk_type"|"allocated_mb"|"pct_of_total_sql_memory"|"dma_source_id"|"dma_manual_id"'
+    sqlcmd -S $serverName -i sql\memoryClerks.sql -d master -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$memoryClerksFileNameShort -Encoding utf8
+    Update-DmaManifest -shortName $memoryClerksFileNameShort -longName $memoryClerksFileNameLong
+
     WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Batch Footprint Info..." -logOperation "BOTH"
     Set-Content -Path $foldername\$batchFootprintFileNameShort -Encoding utf8 -Value '"PKEY"|"AvgRunTimeMS"|"StatementCount"|"counter_name"|"TotalElapsedTimeMS"|"ExecutionTimePercent"|"ExecutionCountPercent"|"dma_source_id"|"dma_manual_id"'
     sqlcmd -S $serverName -i sql\batchFootprint.sql -d master -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$batchFootprintFileNameShort -Encoding utf8
@@ -704,12 +736,20 @@ else {
     sqlcmd -S $serverName -i sql\sqlAgentJobs.sql -d msdb -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$sqlAgentJobsShort -Encoding utf8
     Update-DmaManifest -shortName $sqlAgentJobsShort -longName $sqlAgentJobsLong
 
+    WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server User Connection Info..." -logOperation "BOTH"
+    Set-Content -Path $foldername\$userConnectionListShort -Encoding utf8 -Value '"PKEY"|"database_name"|"is_user_process"|"host_name"|"program_name"|"login_name"|"num_reads"|"num_writes"|"last_read"|"last_write"|"reads"|"logical_reads"|"writes"|"client_interface_name"|"nt_domain"|"nt_user_name"|"client_net_address"|"local_net_address"|"dma_source_id"|"dma_manual_id"|"client_version"|"protocol_type"|"protocol_version"|"protocol_hex_version"'
+    sqlcmd -S $serverName -i sql\userConnectionInfo.sql -d master -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$userConnectionListShort -Encoding utf8
+    Update-DmaManifest -shortName $userConnectionListShort -longName $userConnectionListLong
+
+    WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Database Size Info..." -logOperation "BOTH"
+    Set-Content -Path $foldername\$dbsizesShort -Encoding utf8 -Value '"PKEY"|"database_name"|"type_desc"|"current_size_mb"|"recovery_model_desc"|"table_count"|"function_count"|"view_count"|"procedure_count"|"trigger_count"|"dma_source_id"|"dma_manual_id"'
+    sqlcmd -S $serverName -i sql\dbSizes.sql -d master -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$dbsizesShort -Encoding utf8
+    Update-DmaManifest -shortName $dbsizesShort -longName $dbsizesLong
+
     Set-Content -Path $foldername\$objectListShort -Encoding utf8 -Value '"PKEY"|"database_name"|"schema_name"|"object_name"|"object_type"|"object_type_desc"|"object_count"|"lines_of_code"|"associated_table_name"|"dma_source_id"|"dma_manual_id"'
     Set-Content -Path $foldername\$tableListShort -Encoding utf8 -Value '"PKEY"|"database_name"|"schema_name"|"table_name"|"partition_count"|"is_memory_optimized"|"temporal_type"|"is_external"|"lock_escalation"|"is_tracked_by_cdc"|"text_in_row_limit"|"is_replicated"|"row_count"|"data_compression"|"total_space_mb"|"used_space_mb"|"unused_space_mb"|"dma_source_id"|"dma_manual_id"|"partition_type"|"is_temp_table"'
     Set-Content -Path $foldername\$indexListShort -Encoding utf8 -Value '"PKEY"|"database_name"|"schema_name"|"table_name"|"index_name"|"index_type"|"is_primary_key"|"is_unique"|"fill_factor"|"allow_page_locks"|"has_filter"|"data_compression"|"data_compression_desc"|"is_partitioned"|"count_key_ordinal"|"count_partition_ordinal"|"count_is_included_column"|"total_space_mb"|"dma_source_id"|"dma_manual_id"|"is_computed_index"|"is_index_on_view"'
     Set-Content -Path $foldername\$columnDatatypesShort -Encoding utf8 -Value '"PKEY"|"database_name"|"schema_name"|"table_name"|"datatype"|"max_length"|"precision"|"scale"|"is_computed"|"is_filestream"|"is_masked"|"encryption_type"|"is_sparse"|"rule_object_id"|"column_count"|"dma_source_id"|"dma_manual_id"'
-    Set-Content -Path $foldername\$userConnectionListShort -Encoding utf8 -Value '"PKEY"|"database_name"|"is_user_process"|"host_name"|"program_name"|"login_name"|"num_reads"|"num_writes"|"last_read"|"last_write"|"reads"|"logical_reads"|"writes"|"client_interface_name"|"nt_domain"|"nt_user_name"|"client_net_address"|"local_net_address"|"dma_source_id"|"dma_manual_id"|"client_version"|"protocol_type"|"protocol_version"|"protocol_hex_version"'
-    Set-Content -Path $foldername\$dbsizesShort -Encoding utf8 -Value '"PKEY"|"database_name"|"type_desc"|"current_size_mb"|"recovery_model_desc"|"table_count"|"function_count"|"view_count"|"procedure_count"|"trigger_count"|"dma_source_id"|"dma_manual_id"'
     Set-Content -Path $foldername\$databaseLevelBlockingFeaturesShort -Encoding utf8 -Value '"PKEY"|"database_name"|"feature_name"|"is_enabled_or_used"|"occurance_count"|"dma_source_id"|"dma_manual_id"'
     Set-Content -Path $foldername\$deepScannerShort -Encoding utf8 -Value '"PKEY"|"database_name"|"schema_name"|"object_name"|"object_type"|"incompatibility_type"|"severity"|"violation_count"|"dma_source_id"|"dma_manual_id"'
 
@@ -732,22 +772,14 @@ else {
             sqlcmd -S $serverName -i sql\columnDatatypes.sql -d $databaseName -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v database=$databaseName -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$columnDatatypesShort -Encoding utf8
             Update-DmaManifest -shortName $columnDatatypesShort -longName $columnDatatypesLong
 
-            WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server User Connection Info for Database $databaseName ..." -logOperation "BOTH"
-            sqlcmd -S $serverName -i sql\userConnectionInfo.sql -d $databaseName -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v database=$databaseName -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$userConnectionListShort -Encoding utf8
-            Update-DmaManifest -shortName $userConnectionListShort -longName $userConnectionListLong
-
             WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Blocked Features for Database $databaseName ..." -logOperation "BOTH"
             sqlcmd -S $serverName -i sql\dbServerFeaturesDatabaseLevel.sql -d $databaseName -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v database=$databaseName -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$databaseLevelBlockingFeaturesShort -Encoding utf8
             Update-DmaManifest -shortName $databaseLevelBlockingFeaturesShort -longName $databaseLevelBlockingFeaturesLong
+
+            WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Deep Postgres Migration Blocker Info for Database $databaseName ..." -logOperation "BOTH"
+            sqlcmd -S $serverName -i sql\tsqlPostgresDeepScanner.sql -d $databaseName -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v database=$databaseName -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$deepScannerShort -Encoding utf8
+            Update-DmaManifest -shortName $deepScannerShort -longName $deepScannerLong
         }
-
-        WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Database Size Info for Database $databaseName ..." -logOperation "BOTH"
-        sqlcmd -S $serverName -i sql\dbSizes.sql -d $databaseName -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v database=$databaseName -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$dbsizesShort -Encoding utf8
-        Update-DmaManifest -shortName $dbsizesShort -longName $dbsizesLong
-
-        WriteLog -logLocation $foldername\$logFile -logMessage "Retrieving SQL Server Deep Postgres Migration Blocker Info for Database $databaseName ..." -logOperation "BOTH"
-        sqlcmd -S $serverName -i sql\tsqlPostgresDeepScanner.sql -d $databaseName -C -l 30 -W -m 1 -u -h -1 -w 32768 -v pkey=$pkey -v database=$databaseName -v dmaSourceId=$dmaSourceId -v dmaManualId=$manualUniqueId -s "|" @sqlcmdAuthArgs | Where-Object { $_ -notmatch '---' } | Add-Content -Path $foldername\$deepScannerShort -Encoding utf8
-        Update-DmaManifest -shortName $deepScannerShort -longName $deepScannerLong
     }
 
     if ($isCloudOrLinuxHost -eq "AZURE") {
