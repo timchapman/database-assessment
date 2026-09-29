@@ -44,8 +44,8 @@ BufferPoolUserData AS (
 RingBufferPressure AS (
     SELECT 
         COUNT(*) AS total_pressure_events,
-        ISNULL(SUM(CASE WHEN r.record.value('(//Record/ResourceMonitor/IndicatorsProcess)[1]', 'INT') = 1 THEN 1 ELSE 0 END), 0) AS internal_sql_pressure_events,
-        ISNULL(SUM(CASE WHEN r.record.value('(//Record/ResourceMonitor/IndicatorsSystem)[1]', 'INT') = 1 THEN 1 ELSE 0 END), 0) AS external_os_pressure_events
+        ISNULL(SUM(CASE WHEN CAST(r.record AS XML).value('(//Record/ResourceMonitor/IndicatorsProcess)[1]', 'INT') = 1 THEN 1 ELSE 0 END), 0) AS internal_sql_pressure_events,
+        ISNULL(SUM(CASE WHEN CAST(r.record AS XML).value('(//Record/ResourceMonitor/IndicatorsSystem)[1]', 'INT') = 1 THEN 1 ELSE 0 END), 0) AS external_os_pressure_events
     FROM sys.dm_os_ring_buffers r
     WHERE r.ring_buffer_type = 'RING_BUFFER_RESOURCE_MONITOR'
 )
@@ -56,7 +56,7 @@ SELECT
     '"' + CONVERT(NVARCHAR(30), cfg_max.value_in_use) + '"' AS max_server_memory_mb,
     '"' + CONVERT(NVARCHAR(30), cfg_min.value_in_use) + '"' AS min_server_memory_mb,
     '"' + CONVERT(NVARCHAR(30), pm.physical_memory_in_use_kb / 1024) + '"' AS sql_working_set_mb,
-    '"' + CONVERT(NVARCHAR(60), pm.process_memory_model_desc) + '"' AS memory_model,
+    '"' + CASE WHEN pm.locked_page_allocations_kb > 0 THEN 'LOCK_PAGES' ELSE 'CONVENTIONAL' END + '"' AS memory_model,
     '"' + CONVERT(NVARCHAR(30), d.user_data_on_disk_mb) + '"' AS user_data_on_disk_mb,
     '"' + CONVERT(NVARCHAR(30), b.buffer_pool_user_data_mb) + '"' AS buffer_pool_user_data_mb,
     '"' + CONVERT(NVARCHAR(20), rb.total_pressure_events) + '"' AS lifetime_pressure_events,

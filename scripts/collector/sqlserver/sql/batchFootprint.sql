@@ -44,8 +44,8 @@ SELECT
     StatementCount = CAST(bcount.cntr_value AS BIGINT),
     bcount.counter_name,
     TotalElapsedTimeMS = btime.cntr_value,
-    ExecutionTimePercent = CAST((100.0 * btime.cntr_value / SUM(btime.cntr_value) OVER ()) AS DECIMAL(5, 2)),
-    ExecutionCountPercent = CAST((100.0 * bcount.cntr_value / SUM(bcount.cntr_value) OVER ()) AS DECIMAL(5, 2)),
+    ExecutionTimePercent = ISNULL(CAST((100.0 * btime.cntr_value / NULLIF(SUM(btime.cntr_value) OVER (), 0)) AS DECIMAL(5, 2)), 0.0),
+    ExecutionCountPercent = ISNULL(CAST((100.0 * bcount.cntr_value / NULLIF(SUM(bcount.cntr_value) OVER (), 0)) AS DECIMAL(5, 2)), 0.0),
     @DMA_SOURCE_ID AS dma_source_id,
     @DMA_MANUAL_ID AS dma_manual_id
 FROM (
