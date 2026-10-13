@@ -165,6 +165,129 @@ class TestSqlServerCollectorSeams(unittest.TestCase):
                 f"Column count mismatch for ${var_name}: expected {expected_cols}, got {actual_cols}",
             )
 
+    def test_no_unescaped_sqlcmd_variables_in_sql_scripts(self) -> None:
+        """Verify that no SQL file contains unescaped $(...) tokens that break sqlcmd variable substitution."""
+        allowed_vars = {
+            "$(pkey)",
+            "$(dmaSourceId)",
+            "$(dmaManualId)",
+            "$(database)",
+            "$(hasdbaccess)",
+            "$(cloudtype)",
+            "$(collectionUser)",
+            "$(collectionPass)",
+        }
+        for sql_path in sorted(SQL_DIR.glob("*.sql")):
+            content = sql_path.read_text(encoding="utf-8")
+            for idx, line in enumerate(content.splitlines(), 1):
+                for match in re.finditer(r"\$\([^)]*\)|\$\([^\s']*'", line):
+                    token = match.group(0)
+                    self.assertIn(
+                        token,
+                        allowed_vars,
+                        f"Unescaped sqlcmd variable pattern {token} in {sql_path.name}:{idx}",
+                    )
+
+    def test_db_server_features_cloud_sql_blockers_and_false_positive_guards(self) -> None:
+        """Verify all Cloud SQL unsupported feature/operation checks and false-positive guards in dbServerFeatures.sql and dbServerFeaturesDatabaseLevel.sql."""
+        content = (SQL_DIR / "dbServerFeatures.sql").read_text(encoding="utf-8")
+        for feature_name in (
+            "Performance Data Collector",
+            "ContainedAGCount",
+            "IntegratedAccelerationEnabled",
+            "AzureSQLMILinkActive",
+            "AzureDevOpsServerHost",
+            "ExternalLanguagesRegistered",
+            "BackupsToAzureBlobStorage",
+            "BackupsToObjectStorage",
+            "IsTDS80Used",
+            "in-memory-oltp",
+            "IsDACEnabled",
+            "IsDTCInUse",
+            "IsPMEMEnabled",
+            "IsHybridBufferPoolDirectWriteEnabled",
+            "IsMultiWriteReplicationUsed",
+            "UserCertificatesUsed",
+            "RESTORE",
+        ):
+            self.assertIn(feature_name, content, f"Missing feature check {feature_name} in dbServerFeatures.sql")
+        self.assertIn("WHERE ISNULL(mode, 0) > 0 OR ISNULL(config_in_use, 0) > 0", content)
+        self.assertIn("WHERE el.principal_id <> 4 OR elf.content IS NOT NULL", content)
+        self.assertIn("INNER JOIN sys.database_principals pr ON dp.grantee_principal_id = pr.principal_id", content)
+        self.assertIn("transaction_type = 4 OR ISNULL(dtc_state, 0) > 0", content)
+
+        db_content = (SQL_DIR / "dbServerFeaturesDatabaseLevel.sql").read_text(encoding="utf-8")
+        for db_feature in (
+            "RealTimeOperationalAnalyticsUsed",
+            "UserCertificatesUsed",
+            "RESTORE",
+        ):
+            self.assertIn(db_feature, db_content, f"Missing DB feature check {db_feature} in dbServerFeaturesDatabaseLevel.sql")
+        self.assertIn("INNER JOIN sys.database_principals pr ON dp.grantee_principal_id = pr.principal_id", db_content)
+
+    def test_instance_review_error_scan_excludes_collector_logs_and_guards_trap(self) -> None:
+        """Verify instanceReview.ps1 excludes collector log files from self-scanning and guards trap InvocationInfo."""
+        content = (PS_DIR / "instanceReview.ps1").read_text(encoding="utf-8")
+        self.assertIn("-Exclude $logFile, $sqlErrorLogFile", content)
+        self.assertIn("COLLECTION_SUMMARY.txt", content)
+        self.assertIn("CRASH_REPORT.txt", content)
+        self.assertIn("$trappedError.InvocationInfo -and $trappedError.InvocationInfo.Line", content)
+
+    def test_collector_logging_and_telemetry_coverage(self) -> None:
+        """Verify bootstrap logging, per-step SQL telemetry, pre-flight permission audit, and sub-script logging."""
+        content = (PS_DIR / "instanceReview.ps1").read_text(encoding="utf-8")
+        for token in (
+            "dma_collector_bootstrap.log",
+            "function Write-DmaBootstrapLog",
+            "function Invoke-DmaSqlStep",
+            "function Invoke-DmaPermissionAudit",
+            "[STEP-START]",
+            "[STEP-DONE]",
+            "[STEP-ERROR]",
+            "[PERM-AUDIT]",
+            "[PERM-WARN]",
+            "STEP EXECUTION TELEMETRY",
+            "CSV OUTPUT MANIFEST",
+        ):
+            self.assertIn(token, content, f"Missing telemetry/logging token {token} in instanceReview.ps1")
+
+        perfmon_content = (PS_DIR / "dmaSQLServerPerfmonDataset.ps1").read_text(encoding="utf-8")
+        self.assertNotIn("$foldername\\$logFile", perfmon_content)
+        self.assertIn("$outputDir\\$perfmonLogFile", perfmon_content)
+
+        hw_content = (PS_DIR / "dmaSQLServerHWSpecs.ps1").read_text(encoding="utf-8")
+        self.assertIn("PhysicalCPUs=$($csvData.PhysicalCpuCount)", hw_content)
+        self.assertIn('$_.Exception.GetType().FullName', hw_content)
+
+    def test_sql_hardening_and_false_positive_guards(self) -> None:
+        """Verify parameterized machineSpecsTsql, Azure view names, escaped LIKE wildcards, and safe separator filtering."""
+        machine_specs = (SQL_DIR / "machineSpecsTsql.sql").read_text(encoding="utf-8")
+        self.assertIn("EXEC sys.sp_executesql", machine_specs)
+        self.assertNotIn("EXEC('", machine_specs)
+
+        elastic_pool = (SQL_DIR / "azureElasticPoolStats.sql").read_text(encoding="utf-8")
+        self.assertIn("sys.elastic_pool_resource_stats", elastic_pool)
+        self.assertNotIn("sys.dm_elastic_pool_resource_stats", elastic_pool)
+
+        deep_scanner = (SQL_DIR / "tsqlPostgresDeepScanner.sql").read_text(encoding="utf-8")
+        self.assertIn("'%xp[_]%'", deep_scanner)
+        self.assertIn("'%[^#]#[a-zA-Z_]%'", deep_scanner)
+        self.assertNotIn("('%#%', 'TEMP_TABLE_LOCAL'", deep_scanner)
+
+        agent_jobs = (SQL_DIR / "sqlAgentJobs.sql").read_text(encoding="utf-8")
+        self.assertIn("LEFT JOIN msdb.dbo.syscategories", agent_jobs)
+        self.assertIn("'%xp[_]%'", agent_jobs)
+        self.assertIn("'%sp[_]OA%'", agent_jobs)
+
+        waits_stats = (SQL_DIR / "waitsStats.sql").read_text(encoding="utf-8")
+        self.assertIn("NULLIF(MAX ([W1].[WaitCount]), 0)", waits_stats)
+        self.assertIn('\'"\' + @PKEY + \'"\' AS PKEY', waits_stats)
+
+        driver = (PS_DIR / "instanceReview.ps1").read_text(encoding="utf-8")
+        self.assertIn(r"if ($lineStr -match '^[\s\-|]+$')", driver)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

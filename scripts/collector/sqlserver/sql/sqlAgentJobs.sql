@@ -30,21 +30,24 @@ IF EXISTS (SELECT 1 FROM sys.databases WHERE name = 'msdb' AND HAS_DBACCESS('msd
    AND OBJECT_ID('msdb.dbo.sysjobs') IS NOT NULL
    AND OBJECT_ID('msdb.dbo.sysjobsteps') IS NOT NULL
    AND OBJECT_ID('msdb.dbo.syscategories') IS NOT NULL
+   AND HAS_PERMS_BY_NAME('msdb.dbo.sysjobs', 'OBJECT', 'SELECT') = 1
+   AND HAS_PERMS_BY_NAME('msdb.dbo.sysjobsteps', 'OBJECT', 'SELECT') = 1
+   AND HAS_PERMS_BY_NAME('msdb.dbo.syscategories', 'OBJECT', 'SELECT') = 1
 BEGIN
     SELECT
         '"' + @PKEY + '"' AS pkey,
         '"' + @DMA_SOURCE_ID + '"' AS dma_source_id,
         '"' + @DMA_MANUAL_ID + '"' AS dma_manual_id,
         '"' + CONVERT(NVARCHAR(MAX), j.job_id) + '"' AS job_id,
-        '"' + REPLACE(CONVERT(NVARCHAR(MAX), j.name), '"', '""') + '"' AS job_name,
+        '"' + REPLACE(CONVERT(NVARCHAR(MAX), ISNULL(j.name, N'')), '"', '""') + '"' AS job_name,
         '"' + CONVERT(NVARCHAR(MAX), j.enabled) + '"' AS job_enabled,
-        '"' + REPLACE(CONVERT(NVARCHAR(MAX), c.name), '"', '""') + '"' AS category_name,
-        '"' + REPLACE(CONVERT(NVARCHAR(MAX), j.description), '"', '""') + '"' AS job_description,
+        '"' + REPLACE(CONVERT(NVARCHAR(MAX), ISNULL(c.name, N'')), '"', '""') + '"' AS category_name,
+        '"' + REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX), ISNULL(j.description, N'')), '"', '""'), CHAR(13), ' '), CHAR(10), ' ') + '"' AS job_description,
         '"' + CONVERT(NVARCHAR(MAX), s.step_id) + '"' AS step_id,
-        '"' + REPLACE(CONVERT(NVARCHAR(MAX), s.step_name), '"', '""') + '"' AS step_name,
-        '"' + REPLACE(CONVERT(NVARCHAR(MAX), s.subsystem), '"', '""') + '"' AS subsystem,
-        '"' + REPLACE(CONVERT(NVARCHAR(MAX), s.command), '"', '""') + '"' AS command,
-        '"' + REPLACE(CONVERT(NVARCHAR(MAX), s.database_name), '"', '""') + '"' AS database_name,
+        '"' + REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX), ISNULL(s.step_name, N'')), '"', '""'), CHAR(13), ' '), CHAR(10), ' ') + '"' AS step_name,
+        '"' + REPLACE(CONVERT(NVARCHAR(MAX), ISNULL(s.subsystem, N'')), '"', '""') + '"' AS subsystem,
+        '"' + REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX), ISNULL(s.command, N'')), '"', '""'), CHAR(13), ' '), CHAR(10), ' ') + '"' AS command,
+        '"' + REPLACE(CONVERT(NVARCHAR(MAX), ISNULL(s.database_name, N'')), '"', '""') + '"' AS database_name,
         '"' + CASE
             -- 1. Non-T-SQL Subsystems
             WHEN UPPER(s.subsystem) IN ('CMDEXEC', 'POWERSHELL', 'SSIS', 'PACKAGE', 'ACTIVESCRIPTING', 'ANALYSISQUERY', 'ANALYSISCOMMAND', 'DISTRIBUTION', 'MERGE', 'QUEUEREADER', 'LOGREADER', 'SNAPSHOT')
@@ -61,7 +64,7 @@ BEGIN
                  OR s.command LIKE '%REBUILD%' OR s.command LIKE '%REORGANIZE%' OR s.command LIKE '%sp_updatestats%' OR s.command LIKE '%UPDATE STATISTICS%'
                 THEN 'MAINTENANCE_COMMAND'
             -- 4. Macro Tokens
-            WHEN s.command LIKE '%$(ESCAPE_%' OR s.command LIKE '%$(JOBNAME)%' OR s.command LIKE '%$(STEPID)%' OR s.command LIKE '%$(SRVR)%' OR s.command LIKE '%$(DATE)%' OR s.command LIKE '%$(TIME)%' OR s.command LIKE '%$(JOBID)%' OR s.command LIKE '%$(MACH)%'
+            WHEN s.command LIKE '%$' + '(ESCAPE_%' OR s.command LIKE '%$' + '(JOBNAME)%' OR s.command LIKE '%$' + '(STEPID)%' OR s.command LIKE '%$' + '(SRVR)%' OR s.command LIKE '%$' + '(DATE)%' OR s.command LIKE '%$' + '(TIME)%' OR s.command LIKE '%$' + '(JOBID)%' OR s.command LIKE '%$' + '(MACH)%'
                 THEN 'MACRO_TOKEN'
             ELSE 'NONE'
         END + '"' AS incompatibility_category,
@@ -75,8 +78,8 @@ BEGIN
             WHEN UPPER(s.subsystem) IN ('DISTRIBUTION', 'MERGE', 'QUEUEREADER', 'LOGREADER', 'SNAPSHOT') THEN 'SUBSYSTEM_REPLICATION'
             -- OS & External Calls
             WHEN s.command LIKE '%xp_cmdshell%' THEN 'CMD_XP_CMDSHELL'
-            WHEN s.command LIKE '%xp_%' THEN 'CMD_XP_EXTENDED'
-            WHEN s.command LIKE '%sp_OA%' THEN 'CMD_OLE_AUTOMATION'
+            WHEN s.command LIKE '%xp[_]%' THEN 'CMD_XP_EXTENDED'
+            WHEN s.command LIKE '%sp[_]OA%' THEN 'CMD_OLE_AUTOMATION'
             WHEN s.command LIKE '%sp_send_dbmail%' OR s.command LIKE '%sp_notify_operator%' THEN 'CMD_DATABASE_MAIL'
             WHEN s.command LIKE '%OPENQUERY%' OR s.command LIKE '%OPENROWSET%' THEN 'CMD_LINKED_SERVER'
             -- Maintenance
@@ -84,19 +87,19 @@ BEGIN
             WHEN s.command LIKE '%DBCC %' THEN 'CMD_DBCC'
             WHEN s.command LIKE '%REBUILD%' OR s.command LIKE '%REORGANIZE%' OR s.command LIKE '%sp_updatestats%' OR s.command LIKE '%UPDATE STATISTICS%' THEN 'CMD_INDEX_STATS_MAINT'
             -- Macro Tokens
-            WHEN s.command LIKE '%$(%' THEN 'AGENT_MACRO_TOKEN'
+            WHEN s.command LIKE '%$' + '(%' THEN 'AGENT_MACRO_TOKEN'
             ELSE 'STANDARD_TSQL'
         END + '"' AS incompatibility_type,
         '"' + CASE
             WHEN UPPER(s.subsystem) IN ('CMDEXEC', 'POWERSHELL', 'SSIS', 'PACKAGE', 'ACTIVESCRIPTING', 'ANALYSISQUERY', 'ANALYSISCOMMAND', 'DISTRIBUTION', 'MERGE', 'QUEUEREADER', 'LOGREADER', 'SNAPSHOT') THEN 'CRITICAL'
-            WHEN s.command LIKE '%xp_cmdshell%' OR s.command LIKE '%sp_OA%' OR s.command LIKE '%OPENQUERY%' OR s.command LIKE '%OPENROWSET%' THEN 'CRITICAL'
-            WHEN s.command LIKE '%xp_%' OR s.command LIKE '%sp_send_dbmail%' OR s.command LIKE '%BACKUP %' OR s.command LIKE '%RESTORE %' OR s.command LIKE '%DBCC %' THEN 'HIGH'
-            WHEN s.command LIKE '%REBUILD%' OR s.command LIKE '%REORGANIZE%' OR s.command LIKE '%sp_updatestats%' OR s.command LIKE '%UPDATE STATISTICS%' OR s.command LIKE '%$(%' THEN 'MEDIUM'
+            WHEN s.command LIKE '%xp_cmdshell%' OR s.command LIKE '%sp[_]OA%' OR s.command LIKE '%OPENQUERY%' OR s.command LIKE '%OPENROWSET%' THEN 'CRITICAL'
+            WHEN s.command LIKE '%xp[_]%' OR s.command LIKE '%sp_send_dbmail%' OR s.command LIKE '%BACKUP %' OR s.command LIKE '%RESTORE %' OR s.command LIKE '%DBCC %' THEN 'HIGH'
+            WHEN s.command LIKE '%REBUILD%' OR s.command LIKE '%REORGANIZE%' OR s.command LIKE '%sp_updatestats%' OR s.command LIKE '%UPDATE STATISTICS%' OR s.command LIKE '%$' + '(%' THEN 'MEDIUM'
             ELSE 'NONE'
         END + '"' AS severity
     FROM msdb.dbo.sysjobs j
     INNER JOIN msdb.dbo.sysjobsteps s ON j.job_id = s.job_id
-    INNER JOIN msdb.dbo.syscategories c ON j.category_id = c.category_id
+    LEFT JOIN msdb.dbo.syscategories c ON j.category_id = c.category_id
     ORDER BY j.name, s.step_id;
 END
 ELSE

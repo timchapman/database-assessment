@@ -119,18 +119,18 @@ WITH [Waits] AS
     AND [waiting_tasks_count] > 0
     )
 SELECT
-    @PKEY AS PKEY,
-    MAX ([W1].[wait_type]) AS [WaitType],
-    CAST (MAX ([W1].[WaitS]) AS DECIMAL (16,2)) AS [Wait_S],
-    CAST (MAX ([W1].[ResourceS]) AS DECIMAL (16,2)) AS [Resource_S],
-    CAST (MAX ([W1].[SignalS]) AS DECIMAL (16,2)) AS [Signal_S],
-    MAX ([W1].[WaitCount]) AS [WaitCount],
-    CAST (MAX ([W1].[Percentage]) AS DECIMAL (5,2)) AS [Percentage],
-    CAST ((MAX ([W1].[WaitS]) / MAX ([W1].[WaitCount])) AS DECIMAL (16,4)) AS [AvgWait_S],
-    CAST ((MAX ([W1].[ResourceS]) / MAX ([W1].[WaitCount])) AS DECIMAL (16,4)) AS [AvgRes_S],
-    CAST ((MAX ([W1].[SignalS]) / MAX ([W1].[WaitCount])) AS DECIMAL (16,4)) AS [AvgSig_S],
-    @DMA_SOURCE_ID AS dma_source_id,
-    @DMA_MANUAL_ID AS dma_manual_id
+    '"' + @PKEY + '"' AS PKEY,
+    '"' + CONVERT(NVARCHAR(MAX), MAX ([W1].[wait_type])) + '"' AS [WaitType],
+    '"' + CONVERT(NVARCHAR(MAX), CAST (MAX ([W1].[WaitS]) AS DECIMAL (16,2))) + '"' AS [Wait_S],
+    '"' + CONVERT(NVARCHAR(MAX), CAST (MAX ([W1].[ResourceS]) AS DECIMAL (16,2))) + '"' AS [Resource_S],
+    '"' + CONVERT(NVARCHAR(MAX), CAST (MAX ([W1].[SignalS]) AS DECIMAL (16,2))) + '"' AS [Signal_S],
+    '"' + CONVERT(NVARCHAR(MAX), MAX ([W1].[WaitCount])) + '"' AS [WaitCount],
+    '"' + CONVERT(NVARCHAR(MAX), CAST (MAX ([W1].[Percentage]) AS DECIMAL (5,2))) + '"' AS [Percentage],
+    '"' + CONVERT(NVARCHAR(MAX), CAST ((MAX ([W1].[WaitS]) / NULLIF(MAX ([W1].[WaitCount]), 0)) AS DECIMAL (16,4))) + '"' AS [AvgWait_S],
+    '"' + CONVERT(NVARCHAR(MAX), CAST ((MAX ([W1].[ResourceS]) / NULLIF(MAX ([W1].[WaitCount]), 0)) AS DECIMAL (16,4))) + '"' AS [AvgRes_S],
+    '"' + CONVERT(NVARCHAR(MAX), CAST ((MAX ([W1].[SignalS]) / NULLIF(MAX ([W1].[WaitCount]), 0)) AS DECIMAL (16,4))) + '"' AS [AvgSig_S],
+    '"' + @DMA_SOURCE_ID + '"' AS dma_source_id,
+    '"' + @DMA_MANUAL_ID + '"' AS dma_manual_id
 FROM [Waits] AS [W1]
 INNER JOIN [Waits] AS [W2] ON [W2].[RowNum] <= [W1].[RowNum]
 GROUP BY [W1].[RowNum]

@@ -76,24 +76,24 @@ INSERT INTO #BlockerPatterns VALUES
 -- Dynamic SQL & OLE
 ('%EXEC(%', 'EXEC_DYNAMIC_SQL', 'CRITICAL'),
 ('%EXECUTE(%', 'EXEC_DYNAMIC_SQL', 'CRITICAL'),
-('%sp_executesql%', 'EXEC_SP_EXECUTESQL', 'CRITICAL'),
-('%sp_OACreate%', 'OLE_AUTOMATION', 'CRITICAL'),
-('%sp_OAMethod%', 'OLE_AUTOMATION', 'CRITICAL'),
-('%sp_OASetProperty%', 'OLE_AUTOMATION', 'CRITICAL'),
-('%sp_OAGetProperty%', 'OLE_AUTOMATION', 'CRITICAL'),
+('%sp[_]executesql%', 'EXEC_SP_EXECUTESQL', 'CRITICAL'),
+('%sp[_]OACreate%', 'OLE_AUTOMATION', 'CRITICAL'),
+('%sp[_]OAMethod%', 'OLE_AUTOMATION', 'CRITICAL'),
+('%sp[_]OASetProperty%', 'OLE_AUTOMATION', 'CRITICAL'),
+('%sp[_]OAGetProperty%', 'OLE_AUTOMATION', 'CRITICAL'),
 
 -- Extended Stored Procedures & OS Calls
-('%xp_cmdshell%', 'EXTENDED_PROC_XP_CMDSHELL', 'CRITICAL'),
-('%xp_sendmail%', 'EXTENDED_PROC_XP_SENDMAIL', 'HIGH'),
-('%xp_dirtree%', 'EXTENDED_PROC_XP_DIRTREE', 'HIGH'),
-('%xp_fileexist%', 'EXTENDED_PROC_XP_FILEEXIST', 'HIGH'),
-('%xp_regread%', 'EXTENDED_PROC_XP_REGREAD', 'HIGH'),
-('%xp_regwrite%', 'EXTENDED_PROC_XP_REGWRITE', 'HIGH'),
-('%xp_%', 'EXTENDED_PROC_GENERIC', 'HIGH'),
+('%xp[_]cmdshell%', 'EXTENDED_PROC_XP_CMDSHELL', 'CRITICAL'),
+('%xp[_]sendmail%', 'EXTENDED_PROC_XP_SENDMAIL', 'HIGH'),
+('%xp[_]dirtree%', 'EXTENDED_PROC_XP_DIRTREE', 'HIGH'),
+('%xp[_]fileexist%', 'EXTENDED_PROC_XP_FILEEXIST', 'HIGH'),
+('%xp[_]regread%', 'EXTENDED_PROC_XP_REGREAD', 'HIGH'),
+('%xp[_]regwrite%', 'EXTENDED_PROC_XP_REGWRITE', 'HIGH'),
+('%xp[_]%', 'EXTENDED_PROC_GENERIC', 'HIGH'),
 
 -- Database Mail
-('%sp_send_dbmail%', 'FEATURE_DATABASE_MAIL', 'HIGH'),
-('%sp_notify_operator%', 'FEATURE_DATABASE_MAIL', 'HIGH'),
+('%sp[_]send[_]dbmail%', 'FEATURE_DATABASE_MAIL', 'HIGH'),
+('%sp[_]notify[_]operator%', 'FEATURE_DATABASE_MAIL', 'HIGH'),
 
 -- Identity
 ('%SET IDENTITY_INSERT%', 'SESSION_IDENTITY_INSERT', 'HIGH'),
@@ -168,7 +168,7 @@ INSERT INTO #BlockerPatterns VALUES
 ('%systypes%', 'METADATA_LEGACY_CATALOG', 'HIGH'),
 
 -- Temp Tables
-('%#%', 'TEMP_TABLE_LOCAL', 'HIGH'),
+('%[^#]#[a-zA-Z_]%', 'TEMP_TABLE_LOCAL', 'HIGH'),
 ('%##%', 'TEMP_TABLE_GLOBAL', 'HIGH'),
 
 -- MSDTC / Distributed Transactions
@@ -202,25 +202,39 @@ INNER JOIN sys.objects o ON m.object_id = o.object_id
 INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
 CROSS JOIN #BlockerPatterns p
 WHERE m.definition LIKE p.Pattern
-  AND o.is_ms_shipped = 0;
+  AND o.is_ms_shipped = 0
+  AND (
+      p.IncompatibilityType <> 'EXTENDED_PROC_GENERIC'
+      OR NOT EXISTS (
+          SELECT 1
+          FROM #BlockerPatterns p2
+          WHERE p2.IncompatibilityType LIKE 'EXTENDED_PROC_XP_%'
+            AND m.definition LIKE p2.Pattern
+      )
+  );
 
 -- Part 2: Bulletproof Cross-Database 3-Part & 4-Part Name Dependencies
-INSERT INTO #DetectedBlockers
-SELECT
-    DB_NAME() AS database_name,
-    OBJECT_SCHEMA_NAME(dep.referencing_id) AS schema_name,
-    OBJECT_NAME(dep.referencing_id) AS object_name,
-    o.type_desc AS object_type,
-    CASE
-        WHEN dep.referenced_server_name IS NOT NULL THEN 'LINKED_SERVER_4_PART_NAME'
-        ELSE 'CROSS_DATABASE_3_PART_NAME'
-    END AS incompatibility_type,
-    'CRITICAL' AS severity
-FROM sys.sql_expression_dependencies dep
-INNER JOIN sys.objects o ON dep.referencing_id = o.object_id
-WHERE dep.referenced_database_name IS NOT NULL
-  AND dep.referenced_database_name <> DB_NAME()
-  AND o.is_ms_shipped = 0;
+BEGIN TRY
+    INSERT INTO #DetectedBlockers
+    SELECT
+        DB_NAME() AS database_name,
+        OBJECT_SCHEMA_NAME(dep.referencing_id) AS schema_name,
+        OBJECT_NAME(dep.referencing_id) AS object_name,
+        o.type_desc AS object_type,
+        CASE
+            WHEN dep.referenced_server_name IS NOT NULL THEN 'LINKED_SERVER_4_PART_NAME'
+            ELSE 'CROSS_DATABASE_3_PART_NAME'
+        END AS incompatibility_type,
+        'CRITICAL' AS severity
+    FROM sys.sql_expression_dependencies dep
+    INNER JOIN sys.objects o ON dep.referencing_id = o.object_id
+    WHERE dep.referenced_database_name IS NOT NULL
+      AND dep.referenced_database_name <> DB_NAME()
+      AND o.is_ms_shipped = 0;
+END TRY
+BEGIN CATCH
+    -- Gracefully skip Part 2 if the login lacks SELECT permission on sys.sql_expression_dependencies
+END CATCH;
 
 -- Inject EXPLICIT NONE_DETECTED row if 0 blockers exist in this DB
 IF NOT EXISTS (SELECT 1 FROM #DetectedBlockers)

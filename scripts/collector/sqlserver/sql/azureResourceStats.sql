@@ -31,14 +31,14 @@ SELECT @CLOUDTYPE = 'NONE';
 IF UPPER(@@VERSION) LIKE '%AZURE%'
 	SELECT @CLOUDTYPE = 'AZURE';
 
-IF @CLOUDTYPE = 'AZURE'
+IF @CLOUDTYPE = 'AZURE' AND OBJECT_ID('sys.resource_stats') IS NOT NULL
 BEGIN
     SELECT
         '"' + @PKEY + '"' AS PKEY,
         '"' + CONVERT(NVARCHAR(MAX), start_time, 121) + '"' AS start_time,
         '"' + CONVERT(NVARCHAR(MAX), end_time, 121) + '"' AS end_time,
-        '"' + CONVERT(NVARCHAR(MAX), database_name) + '"' AS database_name,
-        '"' + CONVERT(NVARCHAR(MAX), sku) + '"' AS sku,
+        '"' + REPLACE(ISNULL(CONVERT(NVARCHAR(MAX), database_name), N''), '"', '""') + '"' AS database_name,
+        '"' + REPLACE(ISNULL(CONVERT(NVARCHAR(MAX), sku), N''), '"', '""') + '"' AS sku,
         '"' + CONVERT(NVARCHAR(MAX), avg_cpu_percent) + '"' AS avg_cpu_percent,
         '"' + CONVERT(NVARCHAR(MAX), avg_data_io_percent) + '"' AS avg_data_io_percent,
         '"' + CONVERT(NVARCHAR(MAX), avg_log_write_percent) + '"' AS avg_log_write_percent,

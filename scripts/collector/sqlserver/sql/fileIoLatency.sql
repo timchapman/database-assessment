@@ -27,32 +27,32 @@ SELECT @DMA_SOURCE_ID = N'$(dmaSourceId)';
 SELECT @DMA_MANUAL_ID = N'$(dmaManualId)';
 
 SELECT
-    @PKEY AS PKEY,
-    DB_NAME(vfs.database_id) AS DatabaseName,
-    mf.name AS LogicalFileName,
-    mf.type_desc AS FileType,
-    mf.physical_name AS PhysicalPath,
-    vfs.num_of_reads AS TotalReads,
-    vfs.num_of_bytes_read / 1024 / 1024 AS DataReadMB,
-    vfs.io_stall_read_ms AS TotalReadStallMs,
-    CASE
+    '"' + @PKEY + '"' AS PKEY,
+    '"' + REPLACE(ISNULL(CONVERT(NVARCHAR(MAX), DB_NAME(vfs.database_id)), N''), '"', '""') + '"' AS DatabaseName,
+    '"' + REPLACE(ISNULL(CONVERT(NVARCHAR(MAX), mf.name), N''), '"', '""') + '"' AS LogicalFileName,
+    '"' + REPLACE(ISNULL(CONVERT(NVARCHAR(MAX), mf.type_desc), N''), '"', '""') + '"' AS FileType,
+    '"' + REPLACE(ISNULL(CONVERT(NVARCHAR(MAX), mf.physical_name), N''), '"', '""') + '"' AS PhysicalPath,
+    '"' + CONVERT(NVARCHAR(MAX), vfs.num_of_reads) + '"' AS TotalReads,
+    '"' + CONVERT(NVARCHAR(MAX), vfs.num_of_bytes_read / 1024 / 1024) + '"' AS DataReadMB,
+    '"' + CONVERT(NVARCHAR(MAX), vfs.io_stall_read_ms) + '"' AS TotalReadStallMs,
+    '"' + CONVERT(NVARCHAR(MAX), CASE
         WHEN vfs.num_of_reads = 0 THEN 0
         ELSE vfs.io_stall_read_ms / vfs.num_of_reads
-    END AS AvgReadLatencyMs,
-    vfs.num_of_writes AS TotalWrites,
-    vfs.num_of_bytes_written / 1024 / 1024 AS DataWrittenMB,
-    vfs.io_stall_write_ms AS TotalWriteStallMs,
-    CASE
+    END) + '"' AS AvgReadLatencyMs,
+    '"' + CONVERT(NVARCHAR(MAX), vfs.num_of_writes) + '"' AS TotalWrites,
+    '"' + CONVERT(NVARCHAR(MAX), vfs.num_of_bytes_written / 1024 / 1024) + '"' AS DataWrittenMB,
+    '"' + CONVERT(NVARCHAR(MAX), vfs.io_stall_write_ms) + '"' AS TotalWriteStallMs,
+    '"' + CONVERT(NVARCHAR(MAX), CASE
         WHEN vfs.num_of_writes = 0 THEN 0
         ELSE vfs.io_stall_write_ms / vfs.num_of_writes
-    END AS AvgWriteLatencyMs,
-    vfs.io_stall AS TotalIOStallMs,
-    vfs.size_on_disk_bytes / 1024 / 1024 AS SizeOnDiskMB,
-    @DMA_SOURCE_ID AS dma_source_id,
-    @DMA_MANUAL_ID AS dma_manual_id
+    END) + '"' AS AvgWriteLatencyMs,
+    '"' + CONVERT(NVARCHAR(MAX), vfs.io_stall) + '"' AS TotalIOStallMs,
+    '"' + CONVERT(NVARCHAR(MAX), vfs.size_on_disk_bytes / 1024 / 1024) + '"' AS SizeOnDiskMB,
+    '"' + @DMA_SOURCE_ID + '"' AS dma_source_id,
+    '"' + @DMA_MANUAL_ID + '"' AS dma_manual_id
 FROM
     sys.dm_io_virtual_file_stats(NULL, NULL) AS vfs
 JOIN
     sys.master_files AS mf ON vfs.database_id = mf.database_id AND vfs.file_id = mf.file_id
 ORDER BY
-    TotalIOStallMs DESC;
+    vfs.io_stall DESC;

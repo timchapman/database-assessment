@@ -31,7 +31,7 @@ SELECT @CLOUDTYPE = 'NONE';
 IF UPPER(@@VERSION) LIKE '%AZURE%'
 	SELECT @CLOUDTYPE = 'AZURE';
 
-IF @CLOUDTYPE = 'AZURE'
+IF @CLOUDTYPE = 'AZURE' AND OBJECT_ID('sys.dm_user_db_resource_governance') IS NOT NULL
 BEGIN
     SELECT
         '"' + @PKEY + '"' AS PKEY,
