@@ -285,6 +285,97 @@ class TestSqlServerCollectorSeams(unittest.TestCase):
         driver = (PS_DIR / "instanceReview.ps1").read_text(encoding="utf-8")
         self.assertIn(r"if ($lineStr -match '^[\s\-|]+$')", driver)
 
+    def test_azure_sql_database_mode_two_routed_connections(self) -> None:
+        """Verify the -azureSqlDatabase mode: declared platform, one named database, two persistent connections, routed steps."""
+        driver = (PS_DIR / "instanceReview.ps1").read_text(encoding="utf-8")
+        # D-001 / D-002: explicit switch, mandatory single database, system databases and 'all' rejected
+        self.assertIn("[switch]$azureSqlDatabase", driver)
+        self.assertIn("-azureSqlDatabase requires -database [database name]", driver)
+        self.assertIn("$database -match '^(master|msdb|tempdb|model)$'", driver)
+        # D-003r: two SqlClient connections (master + target) opened once, every step routed by its database name
+        for name in (
+            "New-DmaRoutedSqlConnection",
+            "Initialize-DmaAzureSqlDatabaseConnections",
+            "Resolve-DmaRoutedConnection",
+            "Invoke-DmaRoutedSql",
+            "Close-DmaRoutedConnections",
+        ):
+            self.assertIn(f"function {name}", driver)
+        self.assertIn("$script:DmaRoutedConnections = @{ master = $null; target = $null }", driver)
+        self.assertIn("System.Data.SqlClient.SqlConnection", driver)
+        self.assertNotIn(
+            "ChangeDatabase", driver.split("#region Azure SQL Database routed connections")[1].split("#endregion")[0]
+        )
+        self.assertIn("if (-not ($script:UseEntraOdbcForSqlcmd -or $script:UseAzureSqlDatabaseConnections))", driver)
+        # D-004: Entra uses the identical ODBC ActiveDirectoryInteractive connection string as the Managed Instance path
+        self.assertIn("function Get-DmaEntraOdbcConnectionString", driver)
+        self.assertEqual(driver.count("Get-DmaEntraOdbcConnectionString -ServerInstance"), 2)
+        self.assertNotIn("DmaAzureAccessToken", driver)
+        self.assertIn("System.Data.Odbc.OdbcDataAdapter($command)", driver)
+        # D-005: refused master connection fails at bootstrap with the required grants named
+        self.assertIn("##MS_DefinitionReader##, ##MS_SecurityDefinitionReader## and ##MS_ServerStateReader##", driver)
+        # EngineEdition confirms the declaration and rejects other platforms
+        self.assertIn(
+            "-azureSqlDatabase was specified but $ServerInstance reports $label, not Azure SQL Database (EngineEdition 5)",
+            driver,
+        )
+        # Routing: msdb step skipped, database-scoped telemetry on the target, master-side Azure views scoped to the target database
+        self.assertIn("Skipping SQL Agent Jobs Info...msdb does not exist on Azure SQL Database", driver)
+        self.assertIn('$telemetryDb = if ($azureSqlDatabase) { $databaseNameFilter } else { "master" }', driver)
+        for step in (
+            "CpuUsage",
+            "MemoryUsage",
+            "MemorySizing",
+            "MemoryClerks",
+            "BatchFootprint",
+            "WaitsStats",
+            "QueryOptimizerInfo",
+            "FileIoLatency",
+        ):
+            self.assertRegex(driver, rf'Invoke-DmaSqlStep -StepName "{step}" [^\n]*-DatabaseName \$telemetryDb')
+        self.assertRegex(
+            driver,
+            r'Invoke-DmaSqlStep -StepName "AzureResourceStats" [^\n]*-DatabaseName "master" [^\n]*-SqlcmdVars \$azureSqlVars',
+        )
+        self.assertIn("$dbNameArray = @($database)", driver)
+        self.assertRegex(driver, r'Invoke-DmaSqlStep -StepName "MachineSpecsTsql" [^\n]*-DatabaseName \$telemetryDb')
+        # SQL guards for objects Azure SQL Database does not expose
+        self.assertIn(
+            "IF CONVERT(INT, SERVERPROPERTY('EngineEdition')) = 5",
+            (SQL_DIR / "fileIoLatency.sql").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "sys.database_files AS mf ON vfs.file_id = mf.file_id",
+            (SQL_DIR / "fileIoLatency.sql").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "IF CONVERT(INT, SERVERPROPERTY('EngineEdition')) = 5",
+            (SQL_DIR / "memorySizing.sql").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "IF CONVERT(INT, SERVERPROPERTY('EngineEdition')) <> 5",
+            (SQL_DIR / "dbccTraceFlags.sql").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "WHERE (@DBNAME IN (N'all', N'master', N'') OR database_name = @DBNAME)",
+            (SQL_DIR / "azureResourceStats.sql").read_text(encoding="utf-8"),
+        )
+        self.assertIn("AND DB_NAME() <> 'master'", (SQL_DIR / "getDmaSourceId.sql").read_text(encoding="utf-8"))
+        # Column names verified against a live Azure SQL Database (2026-11-05); three-part master. xp_ references are compile errors there
+        self.assertIn("used_storage_mb", (SQL_DIR / "azureDbResourceStats.sql").read_text(encoding="utf-8"))
+        self.assertIn("max_db_memory / 1024", (SQL_DIR / "azureResourceGovernance.sql").read_text(encoding="utf-8"))
+        self.assertIn(
+            "sys.dm_user_db_resource_governance AS rg ON rg.database_id = DB_ID()",
+            (SQL_DIR / "machineSpecsTsql.sql").read_text(encoding="utf-8"),
+        )
+        for name in ("componentsInstalled.sql", "instanceErrorLog.sql"):
+            self.assertNotRegex((SQL_DIR / name).read_text(encoding="utf-8"), r"(?i)EXEC\s+master\.(sys|dbo)\.xp_")
+        # Batch wrapper forwards the switch
+        bat = (PS_DIR / "runAssessment.bat").read_text(encoding="utf-8")
+        self.assertIn('if /i "%1" == "-azureSqlDatabase" set "azureSqlDbSwitch=-azureSqlDatabase"', bat)
+        self.assertEqual(bat.count("CALL %command% %azureSqlDbSwitch%"), 2)
+        self.assertEqual(bat.count("CALL %command% -collectVMSpecs %azureSqlDbSwitch%"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

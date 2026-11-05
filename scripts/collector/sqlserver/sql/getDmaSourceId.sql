@@ -27,6 +27,11 @@ SELECT @DBNAME = 'msdb'
 IF UPPER(@@VERSION) LIKE '%AZURE%'
 	SELECT @CLOUDTYPE = 'AZURE', @DBNAME = 'master';
 
+/* Azure SQL Database (EngineEdition 5) is collected one database at a time: identify the connected
+   database rather than the logical server's master so each collected database is its own source. */
+IF @CLOUDTYPE = 'AZURE' AND CONVERT(INT, SERVERPROPERTY('EngineEdition')) = 5 AND DB_NAME() <> 'master'
+	SELECT @DBNAME = DB_NAME();
+
 IF CHARINDEX('\', @@SERVERNAME)-1 = -1
   SELECT @MACHINE_NAME = UPPER(@@SERVERNAME)
 ELSE

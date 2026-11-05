@@ -31,17 +31,20 @@ SELECT @CLOUDTYPE = 'NONE';
 IF UPPER(@@VERSION) LIKE '%AZURE%'
 	SELECT @CLOUDTYPE = 'AZURE';
 
+/* Column names verified against a live Azure SQL Database (EngineEdition 5). The CSV header keeps its historical names;
+   sources: cpu_limit (vCores), max_db_memory (KB -> MB), max_memory_grant (% of DB memory, best available proxy),
+   max_db_max_size_in_mb (-> GB), primary_group_max_io (IOPS), primary_max_log_rate (bytes/s -> MB/s). */
 IF @CLOUDTYPE = 'AZURE' AND OBJECT_ID('sys.dm_user_db_resource_governance') IS NOT NULL
 BEGIN
     SELECT
         '"' + @PKEY + '"' AS PKEY,
         '"' + CONVERT(NVARCHAR(MAX), database_id) + '"' AS database_id,
-        '"' + CONVERT(NVARCHAR(MAX), logical_cpu_count) + '"' AS logical_cpu_count,
-        '"' + CONVERT(NVARCHAR(MAX), process_memory_limit_mb) + '"' AS process_memory_limit_mb,
-        '"' + CONVERT(NVARCHAR(MAX), max_global_index_size_mb) + '"' AS max_global_index_size_mb,
-        '"' + CONVERT(NVARCHAR(MAX), user_data_cap_gb) + '"' AS user_data_cap_gb,
-        '"' + CONVERT(NVARCHAR(MAX), user_data_iops_cap) + '"' AS user_data_iops_cap,
-        '"' + CONVERT(NVARCHAR(MAX), log_write_cap_mb_sec) + '"' AS log_write_cap_mb_sec,
+        '"' + ISNULL(CONVERT(NVARCHAR(MAX), cpu_limit), '') + '"' AS logical_cpu_count,
+        '"' + ISNULL(CONVERT(NVARCHAR(MAX), max_db_memory / 1024), '') + '"' AS process_memory_limit_mb,
+        '"' + ISNULL(CONVERT(NVARCHAR(MAX), max_memory_grant), '') + '"' AS max_global_index_size_mb,
+        '"' + ISNULL(CONVERT(NVARCHAR(MAX), max_db_max_size_in_mb / 1024), '') + '"' AS user_data_cap_gb,
+        '"' + ISNULL(CONVERT(NVARCHAR(MAX), primary_group_max_io), '') + '"' AS user_data_iops_cap,
+        '"' + ISNULL(CONVERT(NVARCHAR(MAX), primary_max_log_rate / 1048576), '') + '"' AS log_write_cap_mb_sec,
         '"' + @DMA_SOURCE_ID + '"' AS dma_source_id,
         '"' + @DMA_MANUAL_ID + '"' AS dma_manual_id
     FROM sys.dm_user_db_resource_governance;
